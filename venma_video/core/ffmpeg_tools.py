@@ -1,7 +1,4 @@
-"""FFmpeg / FFprobe helpers: locate binaries, probe media, grab thumbnails, build export commands.
 
-Pure Python (no Qt) so it can be tested and reused from worker threads.
-"""
 import json
 import os
 import shutil
@@ -171,7 +168,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
     last = "base"
     for k, (i, c) in enumerate(vparts):
         out = f"o{k}"
-        filters.append(f"[{last}][v{i}]overlay=eof_action=pass:enable='between(t,{_num(c.start)},{_num(c.end)})'[{out}]")
+        filters.append(f"[{last}][v{i}]overlay=enable='between(t,{_num(c.start)},{_num(c.end)})'[{out}]")
         last = out
     filters.append(f"[{last}]format=yuv420p[vout]")
     maps = ["-map", "[vout]"]
