@@ -1,20 +1,23 @@
 """Venma Video main window: same layout language as Venma (tool palette, options bar, tabbed side
 panels), with a preview monitor and a multi-track timeline in the centre."""
 import os
+import shutil
+import tempfile
 
 from PyQt5.QtCore import Qt, QSize, QTimer, QSettings
 from PyQt5.QtGui import QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QToolBar, QAction, QActionGroup,
     QDockWidget, QTabWidget, QSplitter, QFileDialog, QMessageBox, QCheckBox, QProgressDialog, QSizePolicy,
-    QApplication,
+    QApplication, QToolButton, QMenu,
 )
 
 from . import theme
 from ..core import ffmpeg_tools as ft
-from ..core.project import Project, MediaItem, CLIP_DEFAULTS
+from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS
 from .timeline import TimelineWidget, format_tc
 from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
+from .titles import render_project_titles
 from .panels import MediaBin, PropertiesPanel, HistoryPanel, ProjectDialog, ExportDialog
 from ..workers import MediaWorker, ExportWorker
 
@@ -79,6 +82,9 @@ class MainWindow(QMainWindow):
         self.a_save = A("&Save", self.save_project, "Ctrl+S", "save")
         self.a_saveas = A("Save &As…", lambda: self.save_project(True), "Ctrl+Shift+S")
         self.a_import = A("&Import Media…", self.import_dialog, "Ctrl+I", "import")
+        self.a_title = A("Add &Title", lambda: self.add_title("Title"), "Ctrl+T", "text")
+        self.a_lower = A("Add &Lower Third", lambda: self.add_title("Lower third"), "Ctrl+Shift+T")
+        self.a_subtitle = A("Add &Subtitle", lambda: self.add_title("Subtitle"), "Ctrl+Alt+T")
         self.a_export = A("&Export Video…", self.export_video, "Ctrl+M", "export")
         self.a_settings = A("Project &Settings…", self.project_settings, "Ctrl+Alt+P")
         self.a_quit = A("&Quit", self.close, "Ctrl+Q")
@@ -109,6 +115,9 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&Edit")
         for a in (self.a_undo, self.a_redo, None, self.a_split, self.a_delete, self.a_ripple):
             m.addSeparator() if a is None else m.addAction(a)
+        m = mb.addMenu("&Insert")
+        for a in (self.a_title, self.a_lower, self.a_subtitle):
+            m.addAction(a)
         m = mb.addMenu("&Playback")
         for a in (self.a_play, None, self.a_start, self.a_end, self.a_prev, self.a_next):
             m.addSeparator() if a is None else m.addAction(a)
@@ -127,6 +136,15 @@ class MainWindow(QMainWindow):
         tb.addActions([self.a_open, self.a_save])
         tb.addSeparator()
         tb.addActions([self.a_import])
+        self.b_text = QToolButton()                      # click = add a title, arrow = pick a preset
+        self.b_text.setDefaultAction(self.a_title)
+        self.b_text.setText(" Text")
+        self.b_text.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.b_text.setPopupMode(QToolButton.MenuButtonPopup)
+        menu = QMenu(self.b_text)
+        menu.addActions([self.a_title, self.a_lower, self.a_subtitle])
+        self.b_text.setMenu(menu)
+        tb.addWidget(self.b_text)
         tb.addSeparator()
         tb.addActions([self.a_undo, self.a_redo])
         tb.addSeparator()
@@ -264,6 +282,7 @@ class MainWindow(QMainWindow):
         c.clipTrimmed.connect(self._on_clip_trimmed)
         c.clipRippled.connect(self._on_clip_rippled)
         c.clipSlipped.connect(self._on_clip_slipped)
+        self.props.titleEdited.connect(self._on_title_edit)
         c.statusMessage.connect(lambda msg: self.statusBar().showMessage(msg, 4000))
         c.splitRequested.connect(self._on_split_requested)
         c.mediaDropped.connect(self._on_media_dropped)
@@ -335,7 +354,7 @@ class MainWindow(QMainWindow):
         self.timeline.canvas.set_project(self.project)
         self.engine.set_project(self.project, reset=rebuild_bin)
         self.timeline.canvas.set_playhead(self.engine.t)
-        if rebuild_bin or self.media_bin.list.count() != len(self.project.media):
+        if rebuild_bin or self.media_bin.list.count() != len(self.project.library()):
             self.media_bin.populate(self.project, self.thumbs)
         self.history_panel.set_states(self.labels, self.index)
         self.a_undo.setEnabled(self.index > 0)
@@ -350,7 +369,7 @@ class MainWindow(QMainWindow):
         self.dur_label.setText("/ " + format_tc(p.duration(), p.fps))
         self.tc_label.setText(format_tc(self.engine.t, p.fps))
         self.fmt_label.setText(f"{p.width}×{p.height} · {p.fps} fps")
-        self.statusBar().showMessage(f"{len(p.clips)} clip(s) · {len(p.media)} media file(s)", 4000)
+        self.statusBar().showMessage(f"{len(p.clips)} clip(s) · {len(p.library())} media file(s)", 4000)
 
     def _update_clip_panel(self):
         sid = self.timeline.canvas.selected
@@ -419,6 +438,21 @@ class MainWindow(QMainWindow):
         self.timeline.canvas.select(c.id)
         # Seek to clip start so preview immediately displays the new video
         self.engine.seek(c.start)
+
+    def add_title(self, preset="Title"):
+        """Add a title clip at the playhead (on the top video track) using a style preset."""
+        c = self.project.add_title(self.engine.t, **TITLE_PRESETS.get(preset, {}))
+        self.commit(f"Add {preset}")
+        self.timeline.canvas.select(c.id)
+        self.engine.seek(c.start)
+
+    def _on_title_edit(self, key, value):
+        sid = self.timeline.canvas.selected
+        if sid and self.project.set_title(sid, **{key: value}):
+            self.dirty = True
+            self.engine.refresh()
+            self.timeline.canvas.invalidate()           # the clip shows the title text
+            self._edit_timer.start()
 
     def remove_media(self, media_id):
         used = sum(1 for c in self.project.clips if c.media_id == media_id)
@@ -495,7 +529,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Import failed", f"{os.path.basename(path)}\n\n{err or 'Unsupported file.'}")
             return
         p = self.project
-        first = not p.media and not p.clips
+        first = not p.library() and not p.clips
         item = MediaItem(p.new_media_id(), path, **info)
         p.add_media(item)
         if img is not None:
@@ -510,7 +544,7 @@ class MainWindow(QMainWindow):
 
     # ── project files ────────────────────────────────────────────────────────
     def _confirm_discard(self):
-        if not self.dirty or not self.project.clips and not self.project.media:
+        if not self.dirty or not self.project.clips and not self.project.library():
             return True
         r = QMessageBox.question(self, "Unsaved changes", "Save changes to this project first?",
                                  QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
@@ -556,11 +590,11 @@ class MainWindow(QMainWindow):
         self.engine.t = 0.0
         self._reset_history("Open Project")
         self._refresh_all(rebuild_bin=True)
-        missing = [m.name for m in proj.media.values() if not os.path.isfile(m.path)]
+        missing = [m.name for m in proj.library() if not os.path.isfile(m.path)]
         if missing:
             QMessageBox.warning(self, "Missing media", "These files could not be found:\n\n" + "\n".join(missing[:15]))
         jobs = [dict(path=m.path, probe=False, kind=m.kind, duration=m.duration)
-                for m in proj.media.values() if os.path.isfile(m.path) and m.kind != "audio"]
+                for m in proj.library() if os.path.isfile(m.path) and m.kind != "audio"]
         if jobs and ft.have_ffmpeg():
             w = MediaWorker(jobs, self)
             w.ready.connect(self._on_thumb_ready)
@@ -613,13 +647,21 @@ class MainWindow(QMainWindow):
         out, fmt, quality = d.values()
         if not out:
             return
-        missing = [p.media[c.media_id].name for c in p.clips if not os.path.isfile(p.media[c.media_id].path)]
+        missing = [p.media[c.media_id].name for c in p.clips
+                   if c.title is None and not os.path.isfile(p.media[c.media_id].path)]
         if missing:
             QMessageBox.warning(self, "Missing media", "Can't export — missing files:\n\n" + "\n".join(sorted(set(missing))[:15]))
             return
+        title_dir = None
         try:
-            cmd = ft.build_export_command(p, out, fmt, quality)
+            text_images = {}
+            if any(c.title is not None for c in p.clips):
+                title_dir = tempfile.mkdtemp(prefix="venma_titles_")       # one transparent PNG per title
+                text_images = render_project_titles(p, title_dir)
+            cmd = ft.build_export_command(p, out, fmt, quality, text_images=text_images)
         except Exception as e:
+            if title_dir:
+                shutil.rmtree(title_dir, ignore_errors=True)
             QMessageBox.critical(self, "Export", str(e))
             return
         dlg = QProgressDialog("Rendering…", "Cancel", 0, 1000, self)
@@ -634,6 +676,8 @@ class MainWindow(QMainWindow):
 
         def done(ok, msg):
             dlg.close()
+            if title_dir:
+                shutil.rmtree(title_dir, ignore_errors=True)
             if ok:
                 QMessageBox.information(self, "Export", f"Saved to\n{out}")
             elif "cancel" not in msg.lower():
@@ -651,7 +695,8 @@ class MainWindow(QMainWindow):
         for tid, icon in (("select", "move"), ("ripple", "ripple"), ("slip", "slip"), ("razor", "razor"),
                           ("hand", "hand"), ("zoom", "zoom")):
             self.tool_actions[tid].setIcon(theme.icon(icon, 20))
-        for a, ic in ((self.a_open, "open"), (self.a_save, "save"), (self.a_import, "import"), (self.a_undo, "undo"),
+        for a, ic in ((self.a_open, "open"), (self.a_save, "save"), (self.a_import, "import"), (self.a_title, "text"),
+                      (self.a_undo, "undo"),
                       (self.a_redo, "redo"), (self.a_zin, "zoom_in"), (self.a_zout, "zoom_out"), (self.a_fit, "fit"),
                       (self.a_start, "skip_back"), (self.a_prev, "step_back"), (self.a_next, "step_fwd"),
                       (self.a_end, "skip_fwd")):

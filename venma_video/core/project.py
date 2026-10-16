@@ -13,6 +13,25 @@ MIN_CLIP = 0.1
 IMAGE_DEFAULT_DURATION = 5.0
 PROJECT_VERSION = 1
 
+# Titles are ordinary clips on a video track whose picture is drawn from text instead of read from a
+# file. They point at one shared placeholder media item (kind "text") that never shows up in the media bin.
+TEXT_KIND = "text"
+TEXT_MEDIA_ID = "mtext"
+STILL_KINDS = ("image", TEXT_KIND)       # single-frame / generated kinds: no source range, any length
+TEXT_DEFAULT_DURATION = 4.0
+
+# Text styling lives on the clip. Sizes are in pixels for a 1080-pixel-high frame and scale with the
+# frame; pos_x / pos_y place the centre of the text box as a fraction of the frame (0..1).
+TITLE_DEFAULTS = dict(text="Title", font="", size=96, bold=True, italic=False, color="#FFFFFF",
+                      align="center", pos_x=0.5, pos_y=0.5, stroke=True,
+                      box=False, box_color="#000000", box_opacity=0.55)
+TITLE_PRESETS = {
+    "Title": dict(text="Your Title", size=128, pos_y=0.45),
+    "Lower third": dict(text="Name\nRole or caption", size=60, bold=False, align="left", pos_x=0.3,
+                        pos_y=0.83, stroke=False, box=True),
+    "Subtitle": dict(text="Subtitle text", size=56, bold=False, pos_y=0.90),
+}
+
 DEFAULT_TRACKS = [
     {"name": "V2", "kind": "video"},
     {"name": "V1", "kind": "video"},
@@ -64,6 +83,8 @@ class Clip:
         self.duration = float(duration)
         for k, v in CLIP_DEFAULTS.items():
             setattr(self, k, props.get(k, v))
+        t = props.get("title")                        # None for media clips, a style dict for titles
+        self.title = None if t is None else dict(TITLE_DEFAULTS, **t)
 
     @property
     def end(self):
@@ -73,6 +94,8 @@ class Clip:
         d = dict(id=self.id, media_id=self.media_id, track=self.track, start=self.start,
                  in_point=self.in_point, duration=self.duration)
         d.update({k: getattr(self, k) for k in CLIP_DEFAULTS})
+        if self.title is not None:
+            d["title"] = dict(self.title)
         return d
 
     @staticmethod
@@ -115,9 +138,18 @@ class Project:
         for i, tr in enumerate(self.tracks):
             if tr["kind"] == "video":
                 c = self.clip_at(i, t)
-                if c:
+                if c and c.title is None:             # titles are overlays, not the picture
                     return c
         return None
+
+    def titles_at(self, t):
+        """Title clips visible at t, bottom-most first (so they can be painted in order)."""
+        found = [c for c in self.clips if c.title is not None and c.start <= t < c.end]
+        return sorted(found, key=lambda c: (-c.track, c.start))
+
+    def library(self):
+        """Media the user imported (excludes the hidden placeholder that titles use)."""
+        return [m for m in self.media.values() if m.kind != TEXT_KIND]
 
     def audio_clip_at(self, t):
         """Clip that supplies preview audio at t: first audio-track clip, else the top video clip."""
@@ -140,6 +172,8 @@ class Project:
         idx = [i for i, t in enumerate(self.tracks) if t["kind"] == want]
         if not idx:
             return 0
+        if media_kind == TEXT_KIND:
+            return idx[0]                             # titles sit on the top video track (V2)
         return idx[-1] if want == "video" else idx[0]
 
     # ── placement ──
@@ -172,6 +206,25 @@ class Project:
         self.clips.append(c)
         return c
 
+    def add_title(self, start, duration=TEXT_DEFAULT_DURATION, track=None, **style):
+        """Add a title clip (on the top video track unless ``track`` is given)."""
+        if TEXT_MEDIA_ID not in self.media:
+            self.media[TEXT_MEDIA_ID] = MediaItem(TEXT_MEDIA_ID, "", TEXT_KIND, TEXT_DEFAULT_DURATION)
+        if track is None or not self.track_accepts(track, TEXT_KIND):
+            track = self.first_track_for(TEXT_KIND)
+        s = self.resolve_start(track, start, duration)
+        c = Clip(self._new_id("c"), TEXT_MEDIA_ID, track, s, 0.0, duration, title=dict(TITLE_DEFAULTS, **style))
+        self.clips.append(c)
+        return c
+
+    def set_title(self, clip_id, **style):
+        """Update a title clip's style/text. Returns False if the clip isn't a title."""
+        c = self.clip(clip_id)
+        if c is None or c.title is None:
+            return False
+        c.title.update(style)
+        return True
+
     # ── editing ──
     def split(self, clip_id, t):
         """Split a clip at timeline time t. Returns the new right-hand clip or None."""
@@ -179,6 +232,7 @@ class Project:
         if c is None or not (c.start + MIN_CLIP <= t <= c.end - MIN_CLIP):
             return None
         right = Clip(self._new_id("c"), c.media_id, c.track, t, c.in_point + (t - c.start), c.end - t,
+                     title=None if c.title is None else dict(c.title),
                      **{k: getattr(c, k) for k in CLIP_DEFAULTS})
         c.duration = t - c.start
         self.clips.append(right)
@@ -188,10 +242,10 @@ class Project:
         """(earliest start, latest end) the clip's edges may reach given media length and neighbours."""
         c = self.clip(clip_id)
         m = self.media[c.media_id]
-        left_room = c.start if m.kind == "image" else min(c.start, c.in_point)
+        left_room = c.start if m.kind in STILL_KINDS else min(c.start, c.in_point)
         earliest = c.start - left_room
-        latest = c.end if m.kind == "image" else c.end
-        if m.kind != "image":
+        latest = c.end if m.kind in STILL_KINDS else c.end
+        if m.kind not in STILL_KINDS:
             latest = c.start + (m.duration - c.in_point)
         else:
             latest = float("inf")
@@ -227,9 +281,9 @@ class Project:
         c = self.clip(clip_id)
         m = self.media[c.media_id]
         if side == "left":
-            lo = float("-inf") if m.kind == "image" else c.start - c.in_point
+            lo = float("-inf") if m.kind in STILL_KINDS else c.start - c.in_point
             return lo, c.end - MIN_CLIP
-        hi = float("inf") if m.kind == "image" else c.start + (m.duration - c.in_point)
+        hi = float("inf") if m.kind in STILL_KINDS else c.start + (m.duration - c.in_point)
         return c.start + MIN_CLIP, hi
 
     def ripple_trim(self, clip_id, side, edge):
@@ -249,7 +303,7 @@ class Project:
             delta = edge - c.start               # >0 trims the head, <0 extends it
             if abs(delta) < 1e-9:
                 return 0.0
-            if m.kind != "image":
+            if m.kind not in STILL_KINDS:
                 c.in_point += delta
             c.duration -= delta
             shift = -delta
@@ -267,7 +321,7 @@ class Project:
         """(min, max) in-point for a slip. Images have no source range, so they can't slip."""
         c = self.clip(clip_id)
         m = self.media[c.media_id]
-        if m.kind == "image":
+        if m.kind in STILL_KINDS:
             return 0.0, 0.0
         return 0.0, max(0.0, m.duration - c.duration)
 

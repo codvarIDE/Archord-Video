@@ -2,11 +2,12 @@
 import os
 
 from PyQt5.QtCore import Qt, QSize, QMimeData, pyqtSignal, QByteArray
-from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon
+from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QFont
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QListWidget, QListWidgetItem,
     QAbstractItemView, QComboBox, QSpinBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
-    QFileDialog, QFrame, QGridLayout,
+    QFileDialog, QFrame, QGridLayout, QPlainTextEdit, QFontComboBox, QToolButton, QCheckBox,
+    QColorDialog, QScrollArea,
 )
 
 from . import theme
@@ -129,7 +130,7 @@ class MediaBin(QWidget):
 
     def populate(self, project, thumbs):
         self.clear()
-        for m in project.media.values():
+        for m in project.library():
             th = thumbs.get(m.id)
             self.add_item(m, fit_tile(th) if th is not None else None)
         self.hint.setVisible(self.list.count() == 0)
@@ -167,8 +168,36 @@ class _SliderRow(QWidget):
         self.val.setText(f"{int(round(v))}{self.unit}")
 
 
+class _ColorButton(QPushButton):
+    """A swatch button that opens the colour dialog."""
+    colorChanged = pyqtSignal(str)
+
+    def __init__(self, color="#FFFFFF", title="Colour", parent=None):
+        super().__init__(parent)
+        self._title = title
+        self.setFixedSize(44, 24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.clicked.connect(self._pick)
+        self.set_color(color)
+
+    def color(self):
+        return self._color
+
+    def set_color(self, color):
+        self._color = QColor(color).name().upper()
+        self.setStyleSheet(f"QPushButton {{ background: {self._color}; border: 1px solid {theme.T['border_strong']};"
+                           f" border-radius: 5px; }}")
+
+    def _pick(self):
+        c = QColorDialog.getColor(QColor(self._color), self, self._title)
+        if c.isValid():
+            self.set_color(c.name())
+            self.colorChanged.emit(self._color)
+
+
 class PropertiesPanel(QWidget):
     propertyEdited = pyqtSignal(str, float)    # clip attribute, value
+    titleEdited = pyqtSignal(str, object)      # title style key, value (title clips only)
     resetRequested = pyqtSignal()
 
     # attribute -> (label, lo, hi, default, scale between slider value and attribute)
@@ -182,8 +211,17 @@ class PropertiesPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+        lay = QVBoxLayout(inner)
         lay.setContentsMargins(12, 12, 12, 12)
+        self._loading = False
         self.title = QLabel("No clip selected")
         self.title.setStyleSheet(f"font-family: {theme.SERIF}; font-size: 13pt;")
         self.title.setWordWrap(True)
@@ -195,6 +233,7 @@ class PropertiesPanel(QWidget):
         line = QFrame(); line.setFrameShape(QFrame.HLine)
         line.setStyleSheet(f"color: {theme.T['border']};")
         lay.addWidget(line)
+        self._build_text_section(lay)
         self.rows = {}
         for attr, label, lo, hi, default, scale in self.SPEC:
             r = _SliderRow(label, lo, hi, default)
@@ -207,16 +246,122 @@ class PropertiesPanel(QWidget):
         lay.addStretch(1)
         self.set_clip(None, None, 30)
 
+    # ── title (text) controls ────────────────────────────────────────────────
+    def _emit_title(self, key, value):
+        if not self._loading:
+            self.titleEdited.emit(key, value)
+
+    def _build_text_section(self, lay):
+        self.text_box = QWidget()
+        v = QVBoxLayout(self.text_box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        head = QLabel("Text")
+        head.setStyleSheet("font-weight: 600;")
+        v.addWidget(head)
+
+        self.t_text = QPlainTextEdit()
+        self.t_text.setPlaceholderText("Type your title…")
+        self.t_text.setFixedHeight(78)
+        self.t_text.textChanged.connect(lambda: self._emit_title("text", self.t_text.toPlainText()))
+        v.addWidget(self.t_text)
+
+        self.t_font = QFontComboBox()
+        self.t_font.currentFontChanged.connect(lambda f: self._emit_title("font", f.family()))
+        v.addWidget(self.t_font)
+
+        row = QHBoxLayout()
+        self.t_size = QSpinBox(); self.t_size.setRange(8, 600); self.t_size.setSuffix(" px")
+        self.t_size.valueChanged.connect(lambda n: self._emit_title("size", n))
+        self.t_bold = QToolButton(); self.t_bold.setText("B"); self.t_bold.setCheckable(True)
+        self.t_bold.setStyleSheet("font-weight: 800;")
+        self.t_bold.toggled.connect(lambda on: self._emit_title("bold", on))
+        self.t_italic = QToolButton(); self.t_italic.setText("I"); self.t_italic.setCheckable(True)
+        self.t_italic.setStyleSheet("font-style: italic;")
+        self.t_italic.toggled.connect(lambda on: self._emit_title("italic", on))
+        self.t_align = QComboBox()
+        for label, key in (("Left", "left"), ("Center", "center"), ("Right", "right")):
+            self.t_align.addItem(label, key)
+        self.t_align.currentIndexChanged.connect(lambda _: self._emit_title("align", self.t_align.currentData()))
+        for w in (self.t_size, self.t_bold, self.t_italic, self.t_align):
+            row.addWidget(w)
+        v.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Colour"))
+        self.t_color = _ColorButton("#FFFFFF", "Text colour")
+        self.t_color.colorChanged.connect(lambda c: self._emit_title("color", c))
+        row.addWidget(self.t_color)
+        row.addSpacing(10)
+        self.t_stroke = QCheckBox("Outline")
+        self.t_stroke.toggled.connect(lambda on: self._emit_title("stroke", on))
+        row.addWidget(self.t_stroke)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        row = QHBoxLayout()
+        self.t_box = QCheckBox("Background box")
+        self.t_box.toggled.connect(lambda on: self._emit_title("box", on))
+        self.t_box_color = _ColorButton("#000000", "Background colour")
+        self.t_box_color.colorChanged.connect(lambda c: self._emit_title("box_color", c))
+        row.addWidget(self.t_box)
+        row.addWidget(self.t_box_color)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.t_box_opacity = _SliderRow("Box opacity", 0, 100, 55)
+        self.t_box_opacity.changed.connect(lambda n: self._emit_title("box_opacity", n / 100.0))
+        self.t_x = _SliderRow("Position X", 0, 100, 50)
+        self.t_x.changed.connect(lambda n: self._emit_title("pos_x", n / 100.0))
+        self.t_y = _SliderRow("Position Y", 0, 100, 50)
+        self.t_y.changed.connect(lambda n: self._emit_title("pos_y", n / 100.0))
+        for w in (self.t_box_opacity, self.t_x, self.t_y):
+            v.addWidget(w)
+        line = QFrame(); line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet(f"color: {theme.T['border']};")
+        v.addWidget(line)
+        lay.addWidget(self.text_box)
+
+    def _load_title(self, t):
+        """Show a title's style in the controls without triggering edits."""
+        self._loading = True
+        try:
+            if self.t_text.toPlainText() != t["text"]:        # don't reset the caret while typing
+                self.t_text.setPlainText(t["text"])
+            self.t_font.setCurrentFont(QFont(t["font"]) if t["font"] else QFont())
+            self.t_size.setValue(int(t["size"]))
+            self.t_bold.setChecked(bool(t["bold"]))
+            self.t_italic.setChecked(bool(t["italic"]))
+            self.t_align.setCurrentIndex(max(0, self.t_align.findData(t["align"])))
+            self.t_color.set_color(t["color"])
+            self.t_stroke.setChecked(bool(t["stroke"]))
+            self.t_box.setChecked(bool(t["box"]))
+            self.t_box_color.set_color(t["box_color"])
+            self.t_box_opacity.set_value(t["box_opacity"] * 100)
+            self.t_x.set_value(t["pos_x"] * 100)
+            self.t_y.set_value(t["pos_y"] * 100)
+        finally:
+            self._loading = False
+
+    # ── selection ────────────────────────────────────────────────────────────
     def set_clip(self, clip, media, fps):
         on = clip is not None
+        is_title = on and clip.title is not None
+        self.text_box.setVisible(is_title)
         for attr, (r, scale) in self.rows.items():
             r.setEnabled(on)
+            r.setVisible(not is_title or attr == "opacity")     # titles only have opacity
             if on:
                 r.set_value(getattr(clip, attr) * scale)
         self.b_reset.setEnabled(on)
         if not on:
             self.title.setText("No clip selected")
             self.info.setText("Click a clip in the timeline to edit its properties.")
+            return
+        if is_title:
+            self._load_title(clip.title)
+            self.title.setText("Title")
+            self.info.setText(f"Start  {format_tc(clip.start, fps)}\nLength  {format_tc(clip.duration, fps)}")
             return
         self.title.setText(media.name)
         self.info.setText(f"Start  {format_tc(clip.start, fps)}\nLength  {format_tc(clip.duration, fps)}\n"

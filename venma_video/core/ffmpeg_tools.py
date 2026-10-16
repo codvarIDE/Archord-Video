@@ -117,8 +117,13 @@ def _num(x):
     return f"{x:.4f}".rstrip("0").rstrip(".") or "0"
 
 
-def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Medium"):
-    """Build the ffmpeg argv that renders the whole timeline. Raises ValueError for an empty timeline."""
+def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Medium", text_images=None):
+    """Build the ffmpeg argv that renders the whole timeline. Raises ValueError for an empty timeline.
+
+    ``text_images`` maps a title clip's id to a transparent, project-sized PNG of that title (the UI
+    renders these with Qt so the export matches the preview exactly and needs no ffmpeg fonts).
+    """
+    text_images = text_images or {}
     exe = ffmpeg_path()
     if not exe:
         raise RuntimeError("ffmpeg not found")
@@ -134,14 +139,19 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
     n = 0
     for c in sorted(project.clips, key=lambda c: (-c.track, c.start)):      # lower tracks first
         m = project.media[c.media_id]
-        if m.kind == "image":
-            cmd += ["-loop", "1", "-framerate", str(fps), "-t", _num(c.duration), "-i", m.path]
+        src = m.path
+        if m.kind == "text":
+            src = text_images.get(c.id)
+            if not src:
+                raise ValueError("A title has not been rendered to an image for export.")
+        if m.kind in ("image", "text"):
+            cmd += ["-loop", "1", "-framerate", str(fps), "-t", _num(c.duration), "-i", src]
         else:
             cmd += ["-ss", _num(c.in_point), "-t", _num(c.duration), "-i", m.path]
         i = n
         n += 1
         is_video_track = project.tracks[c.track]["kind"] == "video"
-        if is_video_track and m.kind in ("video", "image"):
+        if is_video_track and m.kind in ("video", "image", "text"):
             chain = [f"fps={fps}", f"scale={W}:{H}:force_original_aspect_ratio=decrease", "setsar=1",
                      "format=rgba", f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black@0"]
             if abs(c.brightness) > 1e-3 or abs(c.contrast - 1) > 1e-3 or abs(c.saturation - 1) > 1e-3:

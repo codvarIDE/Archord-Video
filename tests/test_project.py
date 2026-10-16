@@ -2,7 +2,9 @@ import os
 import tempfile
 import unittest
 
-from venma_video.core.project import MIN_CLIP, Clip, MediaItem, Project
+from venma_video.core.project import (
+    MIN_CLIP, TEXT_MEDIA_ID, TITLE_DEFAULTS, TITLE_PRESETS, Clip, MediaItem, Project,
+)
 
 
 def make_project():
@@ -190,6 +192,89 @@ class SlipTests(unittest.TestCase):
         self.p.slip(self.c.id, 4.0)
         q = Project.from_snapshot(self.p.snapshot())
         self.assertAlmostEqual(q.clip(self.c.id).in_point, 4.0)
+
+
+class TitleTests(unittest.TestCase):
+    def setUp(self):
+        self.p = make_project()
+
+    def test_title_goes_on_top_video_track_with_defaults(self):
+        c = self.p.add_title(2.0)
+        self.assertEqual(c.track, 0)                              # V2
+        self.assertEqual((c.start, c.duration), (2.0, 4.0))
+        self.assertEqual(c.title, TITLE_DEFAULTS)
+        self.assertIn(TEXT_MEDIA_ID, self.p.media)
+
+    def test_style_overrides_and_presets(self):
+        c = self.p.add_title(0.0, **TITLE_PRESETS["Lower third"])
+        self.assertEqual(c.title["align"], "left")
+        self.assertTrue(c.title["box"])
+        self.assertEqual(c.title["text"], "Name\nRole or caption")
+
+    def test_placeholder_media_is_hidden_from_library(self):
+        self.p.add_title(0.0)
+        self.assertEqual({m.id for m in self.p.library()}, {"m1", "m2", "m3"})
+        self.assertEqual(len(self.p.media), 4)
+
+    def test_titles_are_not_the_picture_but_overlay_it(self):
+        video = self.p.add_clip("m1", 1, 0.0)                     # V1
+        title = self.p.add_title(1.0)                             # V2, above the video
+        self.assertIs(self.p.top_video_clip_at(2.0), video)       # picture is still the video
+        self.assertEqual(self.p.titles_at(2.0), [title])
+        self.assertEqual(self.p.titles_at(0.5), [])               # not yet visible
+        self.assertEqual(self.p.titles_at(title.end), [])         # ends exclusive
+
+    def test_title_alone_has_no_picture_clip(self):
+        self.p.add_title(0.0)
+        self.assertIsNone(self.p.top_video_clip_at(1.0))
+
+    def test_titles_at_orders_bottom_to_top(self):
+        low = self.p.add_title(0.0, track=1)                      # V1
+        high = self.p.add_title(0.0, track=0)                     # V2
+        self.assertEqual(self.p.titles_at(1.0), [low, high])
+
+    def test_set_title_updates_only_titles(self):
+        t = self.p.add_title(0.0)
+        v = self.p.add_clip("m1", 1, 10.0)
+        self.assertTrue(self.p.set_title(t.id, text="Hello", size=40))
+        self.assertEqual((t.title["text"], t.title["size"]), ("Hello", 40))
+        self.assertFalse(self.p.set_title(v.id, text="nope"))
+
+    def test_title_survives_save_snapshot_and_split(self):
+        t = self.p.add_title(0.0, text="Persist me", color="#FF0000")
+        q = Project.from_snapshot(self.p.snapshot())
+        self.assertEqual(q.clip(t.id).title["text"], "Persist me")
+        self.assertEqual(q.to_dict(), self.p.to_dict())
+        right = self.p.split(t.id, 2.0)
+        self.assertEqual(right.title["color"], "#FF0000")
+        right.title["text"] = "changed"                            # copies are independent
+        self.assertEqual(t.title["text"], "Persist me")
+
+    def test_media_clips_have_no_title_and_dont_serialise_one(self):
+        c = self.p.add_clip("m1", 1, 0.0)
+        self.assertIsNone(c.title)
+        self.assertNotIn("title", c.to_dict())
+
+    def test_title_can_be_moved_trimmed_and_rippled_freely(self):
+        t = self.p.add_title(0.0)
+        later = self.p.add_title(10.0)
+        self.p.ripple_trim(t.id, "right", 9.0)                    # titles have no source length limit
+        self.assertAlmostEqual(t.duration, 9.0)
+        self.assertAlmostEqual(later.start, 15.0)
+        self.assertEqual(self.p.slip_limits(t.id), (0.0, 0.0))    # but they can't slip
+
+    def test_titles_stay_on_video_tracks(self):
+        c = self.p.add_title(0.0, track=2)                        # A1 is an audio track
+        self.assertEqual(self.p.tracks[c.track]["kind"], "video")
+
+    def test_overlapping_titles_are_pushed_apart(self):
+        a = self.p.add_title(0.0)
+        b = self.p.add_title(1.0)
+        self.assertGreaterEqual(b.start, a.end - 1e-9)
+
+    def test_old_project_files_without_titles_still_load(self):
+        d = make_project().to_dict()
+        self.assertEqual(Project.from_dict(d).to_dict(), d)
 
 
 if __name__ == "__main__":

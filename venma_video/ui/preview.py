@@ -25,12 +25,13 @@ import threading
 import time
 from collections import OrderedDict, deque
 
-from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QRect, pyqtSignal
+from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QRect, QRectF, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QImage
 from PyQt5.QtWidgets import QWidget
 
 from ..core import ffmpeg_tools as ft
 from . import theme
+from .titles import draw_titles
 
 try:
     from PyQt5.QtMultimedia import QAudio, QAudioFormat, QAudioOutput, QAudioDeviceInfo
@@ -49,6 +50,7 @@ class PreviewView(QWidget):
         super().__init__(parent)
         self.aspect = 16 / 9
         self.img = None
+        self.titles_provider = None          # callable -> title clips visible at the current time
         self.setMinimumSize(200, 120)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
 
@@ -82,6 +84,11 @@ class PreviewView(QWidget):
             if self.img.width() != r.width() or self.img.height() != r.height():
                 p.setRenderHint(QPainter.SmoothPixmapTransform)
             p.drawImage(r, self.img)
+        if self.titles_provider is not None:        # titles are painted over the frame, so editing them is instant
+            clips = self.titles_provider()
+            if clips:
+                p.setClipRect(r)
+                draw_titles(p, QRectF(r), clips)
 
 
 # ══ worker threads ════════════════════════════════════════════════════════════════════════════
@@ -283,6 +290,7 @@ class PreviewEngine(QObject):
         self._seek_timer.setInterval(70)
         self._seek_timer.timeout.connect(self._after_seek)
 
+        self.view.titles_provider = self._titles_now
         self.stills = _StillWorker(self)
         self.stills.ready.connect(self._on_still)
         self.stills.start()
@@ -350,6 +358,9 @@ class PreviewEngine(QObject):
                 return
             self._apending = self._apending[n:]
 
+    def _titles_now(self):
+        return self.project.titles_at(self.t) if self.project else []
+
     # ── public API (same as before) ──────────────────────────────────────────────────────────
     def set_project(self, project, reset=False):
         self.project = project
@@ -368,6 +379,7 @@ class PreviewEngine(QObject):
         else:
             self._shown_img = None
             self._show_still()
+        self.view.update()
 
     def refresh(self):
         """Re-apply the current time after an edit (keeps playing state)."""
@@ -378,6 +390,7 @@ class PreviewEngine(QObject):
         else:
             self._shown_img = None
             self._show_still()
+        self.view.update()
 
     def seek(self, t):
         self.t = max(0.0, t)
@@ -619,6 +632,7 @@ class PreviewEngine(QObject):
         now = time.monotonic()
         if force or now - self._last_emit >= self.EMIT_EVERY:
             self._last_emit = now
+            self.view.update(self.view._frame_rect())      # titles follow the playhead
             self.timeChanged.emit(self.t)
 
     # ── still frames (scrubbing, frame step, paused display) ─────────────────────────────────

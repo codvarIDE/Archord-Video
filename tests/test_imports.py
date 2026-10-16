@@ -12,6 +12,7 @@ except ImportError:
 
 MODULES = [
     "venma_video.ui.theme",
+    "venma_video.ui.titles",
     "venma_video.ui.timeline",
     "venma_video.ui.preview",
     "venma_video.ui.panels",

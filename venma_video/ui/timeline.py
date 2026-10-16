@@ -2,11 +2,11 @@
 import math
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QRect, pyqtSignal, QByteArray
-from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QPainterPath, QFontMetrics, QPolygonF, QPixmap
+from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QPainterPath, QFont, QFontMetrics, QPolygonF, QPixmap
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollBar
 
 from . import theme
-from ..core.project import MIN_CLIP
+from ..core.project import MIN_CLIP, STILL_KINDS
 
 MIME_MEDIA = "application/x-venma-media"
 HEADER_W = 84
@@ -14,7 +14,7 @@ RULER_H = 28
 TRACK_H = 58
 EDGE = 7              # px grab zone for trimming
 SNAP_PX = 9
-KIND_COLORS = {"video": "#D97757", "image": "#C79A3B", "audio": "#4F86B5"}
+KIND_COLORS = {"video": "#D97757", "image": "#C79A3B", "audio": "#4F86B5", "text": "#8B6BB5"}
 _STEPS = [0.04, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800]
 
 
@@ -242,8 +242,8 @@ class TimelineCanvas(QWidget):
         if ripple and zone == "body":
             return                                  # ripple only acts on clip edges
         if self.tool == "slip":
-            if self.project.media[c.media_id].kind == "image":
-                self.statusMessage.emit("Slip needs a video or audio clip (images have no source range).")
+            if self.project.media[c.media_id].kind in STILL_KINDS:
+                self.statusMessage.emit("Slip needs a video or audio clip (images and titles have no source range).")
                 return
             zone = "slip"
         self._drag = dict(id=c.id, zone=zone, grab=self.x2t(pos.x()) - c.start, start0=c.start, dur0=c.duration,
@@ -541,13 +541,26 @@ class TimelineCanvas(QWidget):
                 p.drawLine(QPointF(x, mid - h), QPointF(x, mid + h))
                 x += 4
                 i += 1
+        fm = QFontMetrics(p.font())
+        if c.title is not None:                          # title: show its text in the clip body
+            body_txt = " ".join(c.title.get("text", "").split()) or "(empty title)"
+            base_font = p.font()
+            f = QFont(base_font); f.setBold(True)
+            if base_font.pointSizeF() > 0:
+                f.setPointSizeF(base_font.pointSizeF() + 3)
+            p.setFont(f)
+            p.setPen(QColor(255, 255, 255, 235))
+            p.drawText(QRectF(r.left() + 8, r.top() + 14, max(0, r.width() - 14), r.height() - 14),
+                       Qt.AlignVCenter | Qt.AlignLeft,
+                       QFontMetrics(f).elidedText(body_txt, Qt.ElideRight, int(max(0, r.width() - 16))))
+            p.setFont(base_font)
+        label = "Title" if c.title is not None else m.name
         # label bar
         bar = QColor(0, 0, 0, 70)
         p.fillRect(QRectF(r.left(), r.top(), r.width(), 14), bar)
         p.setPen(QColor("white"))
-        fm = QFontMetrics(p.font())
         p.drawText(QRectF(r.left() + 6, r.top(), max(0, r.width() - 10), 14), Qt.AlignVCenter | Qt.AlignLeft,
-                   fm.elidedText(m.name, Qt.ElideRight, int(max(0, r.width() - 12))))
+                   fm.elidedText(label, Qt.ElideRight, int(max(0, r.width() - 12))))
         p.restore()
 
         sel = c.id == self.selected
