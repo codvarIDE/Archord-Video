@@ -18,6 +18,7 @@ so any file FFmpeg can read shows up, on every OS, with no codec packs:
 The playhead clock is a monotonic clock that starts only when the first video frame and the first
 audio chunk are ready, so picture and sound begin together.
 """
+import math
 import subprocess
 import sys
 import tempfile
@@ -25,13 +26,13 @@ import threading
 import time
 from collections import OrderedDict, deque
 
-from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QRect, QRectF, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QImage
+from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QRect, QRectF, QPointF, pyqtSignal
+from PyQt5.QtGui import QPainter, QColor, QImage, QPen, QBrush
 from PyQt5.QtWidgets import QWidget
 
 from ..core import ffmpeg_tools as ft
 from . import theme
-from .titles import draw_titles
+from .titles import draw_titles, layout as title_layout
 
 try:
     from PyQt5.QtMultimedia import QAudio, QAudioFormat, QAudioOutput, QAudioDeviceInfo
@@ -44,15 +45,31 @@ _NOWIN = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 # ══ view ══════════════════════════════════════════════════════════════════════════════════════
 class PreviewView(QWidget):
-    """Paints the current frame, letter-boxed to the project's aspect ratio."""
+    """Paints the current frame, letter-boxed to the project's aspect ratio.
+
+    Titles can be edited directly on the picture: drag a title to move it, drag a corner handle of the
+    selected title to resize it. The view never edits the project itself; it emits signals and the
+    main window applies them (so undo, the Properties panel and saving all stay in one place).
+    """
+
+    titlePicked = pyqtSignal(str)               # clip id of the title that was clicked (select it)
+    titleDragged = pyqtSignal(str, object)      # clip id, {pos_x, pos_y} or {size}  (live, while dragging)
+    titleGestureDone = pyqtSignal(str, str)     # clip id, undo label (mouse released after a real change)
+
+    HANDLE = 6                                   # half-size of a resize handle, in pixels
+    SNAP = 0.012                                 # snap-to-centre distance, as a fraction of the frame
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.aspect = 16 / 9
         self.img = None
         self.titles_provider = None          # callable -> title clips visible at the current time
+        self.selected_provider = None        # callable -> id of the selected clip (or None)
+        self._drag = None                    # active gesture, see mousePressEvent
+        self._guides = (False, False)        # show the vertical / horizontal centre guide
         self.setMinimumSize(200, 120)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setMouseTracking(True)
 
     def set_aspect(self, w, h):
         self.aspect = max(0.1, w / max(1, h))
@@ -75,6 +92,124 @@ class PreviewView(QWidget):
             self.img = None
             self.update(self._frame_rect())
 
+    # ── title geometry / hit testing ─────────────────────────────────────────────────────────
+    def _title_boxes(self):
+        """[(clip, box QRectF)] for visible, non-empty titles, bottom-most first."""
+        if self.titles_provider is None:
+            return []
+        frame = QRectF(self._frame_rect())
+        out = []
+        for c in self.titles_provider() or []:
+            lay = title_layout(c.title, frame)
+            if lay is not None:
+                out.append((c, lay[2]))
+        return out
+
+    def _selected_box(self):
+        sid = self.selected_provider() if self.selected_provider else None
+        if not sid:
+            return None, None
+        for c, box in self._title_boxes():
+            if c.id == sid:
+                return c, box
+        return None, None
+
+    def _corners(self, box):
+        return {"tl": box.topLeft(), "tr": box.topRight(), "bl": box.bottomLeft(), "br": box.bottomRight()}
+
+    def _handle_at(self, pos):
+        c, box = self._selected_box()
+        if c is None:
+            return None, None
+        r = self.HANDLE + 3
+        for name, pt in self._corners(box).items():
+            if abs(pos.x() - pt.x()) <= r and abs(pos.y() - pt.y()) <= r:
+                return c, name
+        return None, None
+
+    def _title_at(self, pos):
+        for c, box in reversed(self._title_boxes()):          # top-most first
+            if box.adjusted(-4, -4, 4, 4).contains(pos):
+                return c
+        return None
+
+    # ── mouse ────────────────────────────────────────────────────────────────────────────────
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return super().mousePressEvent(e)
+        pos = QPointF(e.pos())
+        frame = QRectF(self._frame_rect())
+        c, corner = self._handle_at(pos)
+        if c is not None:
+            _, box = self._selected_box()
+            center = box.center()
+            d0 = max(4.0, math.hypot(pos.x() - center.x(), pos.y() - center.y()))
+            self._drag = dict(mode="resize", id=c.id, center=center, d0=d0, size0=float(c.title["size"]),
+                              changed=False)
+            return
+        c = self._title_at(pos)
+        if c is not None:
+            self.titlePicked.emit(c.id)
+            self._drag = dict(mode="move", id=c.id, start=pos, x0=float(c.title["pos_x"]),
+                              y0=float(c.title["pos_y"]), frame=frame, changed=False)
+            self.setCursor(Qt.SizeAllCursor)
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        pos = QPointF(e.pos())
+        d = self._drag
+        if d is None:
+            self._update_cursor(pos)
+            return super().mouseMoveEvent(e)
+        if d["mode"] == "move":
+            f = d["frame"]
+            nx = d["x0"] + (pos.x() - d["start"].x()) / max(1.0, f.width())
+            ny = d["y0"] + (pos.y() - d["start"].y()) / max(1.0, f.height())
+            gx = gy = False
+            if not (e.modifiers() & Qt.AltModifier):              # hold Alt to move without snapping
+                if abs(nx - 0.5) < self.SNAP:
+                    nx, gx = 0.5, True
+                if abs(ny - 0.5) < self.SNAP:
+                    ny, gy = 0.5, True
+            nx, ny = min(1.0, max(0.0, nx)), min(1.0, max(0.0, ny))
+            self._guides = (gx, gy)
+            d["changed"] = True
+            self.titleDragged.emit(d["id"], {"pos_x": round(nx, 4), "pos_y": round(ny, 4)})
+        else:
+            ctr = d["center"]
+            dist = math.hypot(pos.x() - ctr.x(), pos.y() - ctr.y())
+            size = int(round(min(600.0, max(8.0, d["size0"] * dist / d["d0"]))))
+            d["changed"] = True
+            self.titleDragged.emit(d["id"], {"size": size})
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        d, self._drag = self._drag, None
+        self._guides = (False, False)
+        if d is not None and e.button() == Qt.LeftButton:
+            if d["changed"]:
+                self.titleGestureDone.emit(d["id"], "Move Title" if d["mode"] == "move" else "Resize Title")
+            self._update_cursor(QPointF(e.pos()))
+            self.update()
+            return
+        super().mouseReleaseEvent(e)
+
+    def leaveEvent(self, e):
+        if self._drag is None:
+            self.unsetCursor()
+        super().leaveEvent(e)
+
+    def _update_cursor(self, pos):
+        c, corner = self._handle_at(pos)
+        if c is not None:
+            self.setCursor(Qt.SizeFDiagCursor if corner in ("tl", "br") else Qt.SizeBDiagCursor)
+        elif self._title_at(pos) is not None:
+            self.setCursor(Qt.SizeAllCursor)
+        else:
+            self.unsetCursor()
+
+    # ── painting ─────────────────────────────────────────────────────────────────────────────
     def paintEvent(self, _):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(theme.T["canvas"]))
@@ -89,6 +224,31 @@ class PreviewView(QWidget):
             if clips:
                 p.setClipRect(r)
                 draw_titles(p, QRectF(r), clips)
+                p.setClipping(False)
+        self._paint_overlay(p, r)
+
+    def _paint_overlay(self, p, r):
+        """Editing aids (never exported): centre guides while dragging, selection box and handles."""
+        accent = QColor("#4DA3FF")                      # fixed bright blue: visible on any footage
+        gx, gy = self._guides
+        if gx or gy:
+            p.setPen(QPen(QColor(255, 80, 200, 200), 1, Qt.DashLine))
+            if gx:
+                p.drawLine(r.center().x(), r.top(), r.center().x(), r.bottom())
+            if gy:
+                p.drawLine(r.left(), r.center().y(), r.right(), r.center().y())
+        c, box = self._selected_box()
+        if c is None:
+            return
+        p.setRenderHint(QPainter.Antialiasing, False)
+        p.setPen(QPen(accent, 1, Qt.DashLine))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(box)
+        p.setPen(QPen(accent, 1))
+        p.setBrush(QBrush(QColor("#FFFFFF")))
+        h = self.HANDLE
+        for pt in self._corners(box).values():
+            p.drawRect(QRectF(pt.x() - h / 2.0, pt.y() - h / 2.0, h, h))
 
 
 # ══ worker threads ════════════════════════════════════════════════════════════════════════════

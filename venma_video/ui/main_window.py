@@ -283,6 +283,10 @@ class MainWindow(QMainWindow):
         c.clipRippled.connect(self._on_clip_rippled)
         c.clipSlipped.connect(self._on_clip_slipped)
         self.props.titleEdited.connect(self._on_title_edit)
+        self.view.selected_provider = lambda: self.timeline.canvas.selected
+        self.view.titlePicked.connect(self._on_title_picked)           # click / drag text on the preview
+        self.view.titleDragged.connect(self._on_title_dragged)
+        self.view.titleGestureDone.connect(lambda _cid, label: self.commit(label))
         c.statusMessage.connect(lambda msg: self.statusBar().showMessage(msg, 4000))
         c.splitRequested.connect(self._on_split_requested)
         c.mediaDropped.connect(self._on_media_dropped)
@@ -390,6 +394,7 @@ class MainWindow(QMainWindow):
 
     def _on_selected(self, cid):
         self._update_clip_panel()
+        self.view.update()                              # selection box on the preview
         if cid:
             self.tabs.setCurrentWidget(self.props)
 
@@ -445,6 +450,19 @@ class MainWindow(QMainWindow):
         self.commit(f"Add {preset}")
         self.timeline.canvas.select(c.id)
         self.engine.seek(c.start)
+
+    def _on_title_picked(self, cid):
+        if self.timeline.canvas.selected != cid:
+            self.timeline.canvas.select(cid)
+
+    def _on_title_dragged(self, cid, vals):
+        """Live update while a title is dragged / resized on the preview (committed on mouse release)."""
+        if not self.project.set_title(cid, **vals):
+            return
+        c = self.project.clip(cid)
+        self.props._load_title(c.title)                 # keep X / Y / size controls in sync
+        self.view.update()
+        self.timeline.canvas.invalidate()
 
     def _on_title_edit(self, key, value):
         sid = self.timeline.canvas.selected
