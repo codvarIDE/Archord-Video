@@ -10,13 +10,13 @@ from PyQt5.QtWidgets import (
     QApplication,
 )
 
-import theme
-import ffmpeg_tools as ft
-from project import Project, MediaItem, CLIP_DEFAULTS
-from timeline import TimelineWidget, format_tc
-from preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
-from panels import MediaBin, PropertiesPanel, HistoryPanel, ProjectDialog, ExportDialog
-from workers import MediaWorker, ExportWorker
+from . import theme
+from ..core import ffmpeg_tools as ft
+from ..core.project import Project, MediaItem, CLIP_DEFAULTS
+from .timeline import TimelineWidget, format_tc
+from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
+from .panels import MediaBin, PropertiesPanel, HistoryPanel, ProjectDialog, ExportDialog
+from ..workers import MediaWorker, ExportWorker
 
 MAX_HISTORY = 100
 PROJECT_EXT = ".vvproj"

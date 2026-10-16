@@ -5,8 +5,8 @@ from PyQt5.QtCore import Qt, QRectF, QPointF, QRect, pyqtSignal, QByteArray
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QPainterPath, QFontMetrics, QPolygonF, QPixmap
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollBar
 
-import theme
-from project import MIN_CLIP
+from . import theme
+from ..core.project import MIN_CLIP
 
 MIME_MEDIA = "application/x-venma-media"
 HEADER_W = 84

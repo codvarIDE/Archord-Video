@@ -1,18 +1,33 @@
-# Venma Video — v0.1 (initial version)
+# Venma Video
+
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
 
 A video editor built with the same design language and workspace layout as Venma (PyQt5):
 warm paper/clay theme, vertical tool palette on the left, context options bar on top, tabbed
-side panels, light/dark mode.
+side panels, light/dark mode. Currently **v0.1** (initial version).
 
-## Run
+## Quick start
+
 ```bash
+git clone https://github.com/OWNER/REPO.git
+cd REPO
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-# FFmpeg is required (ffmpeg + ffprobe on PATH):
-#   Windows: winget install Gyan.FFmpeg   macOS: brew install ffmpeg   Linux: sudo apt install ffmpeg
-python main.py            # or: python main.py clip1.mp4 clip2.mp4
+python -m venma_video            # or: python main.py clip1.mp4 clip2.mp4
 ```
-You can also drop `ffmpeg` / `ffprobe` into an `ffmpeg/` folder next to `main.py`, or set the
+
+FFmpeg is required (`ffmpeg` + `ffprobe`):
+
+| OS | Install |
+|---|---|
+| Windows | `winget install Gyan.FFmpeg` |
+| macOS | `brew install ffmpeg` |
+| Linux | `sudo apt install ffmpeg` |
+
+Or drop the binaries into a local `ffmpeg/` folder in the repo root (git-ignored), or set the
 `VENMA_FFMPEG` / `VENMA_FFPROBE` environment variables.
+
+Optional: `pip install qtawesome` for a few extra legacy icons.
 
 ## What it does
 - **Media bin**: import video, audio and images (button, `Ctrl+I`, or drag files onto the window), thumbnails, drag onto the timeline or double-click to append at the playhead.
@@ -47,12 +62,35 @@ You can also drop `ffmpeg` / `ffprobe` into an `ffmpeg/` folder next to `main.py
 - No transitions, text/titles, speed changes, keyframes, or audio waveforms yet.
 - The preview decodes at reduced size (max 960 px, 30 fps) so 4K sources stay smooth; export is always full quality.
 
-## Architecture
-- `project.py` — timeline model (media, clips, tracks), editing operations, JSON snapshots for undo.
-- `ffmpeg_tools.py` — locate/probe/thumbnail, and the FFmpeg `filter_complex` export builder.
-- `workers.py` — background threads: parallel import/thumbnails and export with progress.
-- `timeline.py` — multi-track timeline widget.
-- `preview.py` — preview monitor + threaded FFmpeg playback engine (video, audio and still-frame QThreads, next-clip prefetch).
-- `panels.py` — Media bin, Properties, History, New-project and Export dialogs.
-- `main_window.py` — application layout, menus, commands.
-- `theme.py` — shared Venma design tokens, icons and stylesheet.
+## Project layout
+
+```
+venma_video/
+├── app.py            # QApplication setup / entry point
+├── __main__.py       # python -m venma_video
+├── workers.py        # background QThreads: media import + export with progress
+├── core/             # no Qt UI code — easy to test
+│   ├── project.py        # timeline model (media, clips, tracks), edits, JSON snapshots for undo
+│   └── ffmpeg_tools.py   # locate/probe/thumbnail + the filter_complex export builder
+├── ui/
+│   ├── main_window.py    # application layout, menus, commands
+│   ├── timeline.py       # multi-track timeline widget
+│   ├── preview.py        # preview monitor + threaded FFmpeg playback engine
+│   ├── panels.py         # Media bin, Properties, History, New-project and Export dialogs
+│   └── theme.py          # shared Venma design tokens, icons and stylesheet
+└── assets/           # app icon (venma.ico) and other static files
+tests/                # unittest/pytest suite
+docs/ARCHITECTURE.md  # deeper notes
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces fit together.
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest                # or: python -m unittest discover -s tests -t .
+ruff check .          # lint
+```
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.

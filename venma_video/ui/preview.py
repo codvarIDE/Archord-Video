@@ -29,8 +29,8 @@ from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QRect, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QImage
 from PyQt5.QtWidgets import QWidget
 
-import ffmpeg_tools as ft
-import theme
+from ..core import ffmpeg_tools as ft
+from . import theme
 
 try:
     from PyQt5.QtMultimedia import QAudio, QAudioFormat, QAudioOutput, QAudioDeviceInfo

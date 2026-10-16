@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
-import ffmpeg_tools as ft
+from .core import ffmpeg_tools as ft
 
 
 class MediaWorker(QThread):

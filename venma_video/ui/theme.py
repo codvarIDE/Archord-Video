@@ -107,8 +107,9 @@ def pixmap(name, color, size=20, sw=1.75):
 
 
 def get_app_icon_path():
-    """Returns absolute path to assets/venma.ico if it exists, else None."""
-    for base in (os.path.dirname(os.path.abspath(__file__)), os.getcwd()):
+    """Returns absolute path to venma_video/assets/venma.ico if it exists, else None."""
+    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for base in (pkg, os.getcwd()):
         cand = os.path.join(base, "assets", "venma.ico")
         if os.path.isfile(cand):
             return cand

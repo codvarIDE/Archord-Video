@@ -9,10 +9,10 @@ from PyQt5.QtWidgets import (
     QFileDialog, QFrame, QGridLayout,
 )
 
-import theme
-import ffmpeg_tools as ft
-from project import PRESETS
-from timeline import MIME_MEDIA, format_tc
+from . import theme
+from ..core import ffmpeg_tools as ft
+from ..core.project import PRESETS
+from .timeline import MIME_MEDIA, format_tc
 
 TILE = QSize(104, 58)
 

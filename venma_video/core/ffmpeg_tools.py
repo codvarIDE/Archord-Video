@@ -20,11 +20,13 @@ def _find(name):
     env = os.environ.get("VENMA_" + name.upper())
     if env and os.path.isfile(env):
         return env
-    here = os.path.dirname(os.path.abspath(__file__))
+    # Repo root (…/venma_video/core/ffmpeg_tools.py -> …/), then the current working directory.
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     exe = name + (".exe" if sys.platform == "win32" else "")
-    for cand in (os.path.join(here, "ffmpeg", exe), os.path.join(here, "ffmpeg", "bin", exe)):
-        if os.path.isfile(cand):
-            return cand
+    for base in (root, os.getcwd()):
+        for cand in (os.path.join(base, "ffmpeg", exe), os.path.join(base, "ffmpeg", "bin", exe)):
+            if os.path.isfile(cand):
+                return cand
     return shutil.which(name)
 
 
