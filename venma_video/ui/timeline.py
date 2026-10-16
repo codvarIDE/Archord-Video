@@ -46,6 +46,8 @@ class TimelineCanvas(QWidget):
     clipSelected = pyqtSignal(object)            # clip id or None
     clipMoved = pyqtSignal(str, int, float)      # id, track, start
     clipTrimmed = pyqtSignal(str, str, float)    # id, "left" | "right", new edge time
+    clipRippled = pyqtSignal(str, str, float)    # id, "left" | "right", new edge time (later clips shift)
+    clipSlipped = pyqtSignal(str, float)         # id, new in-point (clip position/length unchanged)
     splitRequested = pyqtSignal(str, float)
     mediaDropped = pyqtSignal(str, int, float)   # media id, track, time
     viewChanged = pyqtSignal()
@@ -161,18 +163,21 @@ class TimelineCanvas(QWidget):
 
     def set_tool(self, tool):
         self.tool = tool
-        self.setCursor({"hand": Qt.OpenHandCursor, "razor": Qt.CrossCursor, "zoom": Qt.CrossCursor}.get(tool, Qt.ArrowCursor))
+        self.setCursor({"hand": Qt.OpenHandCursor, "razor": Qt.CrossCursor, "zoom": Qt.CrossCursor,
+                        "slip": Qt.SizeHorCursor}.get(tool, Qt.ArrowCursor))
 
     # ── snapping ─────────────────────────────────────────────────────────────
     def _snap_points(self, ignore=None):
+        skip = {ignore} if isinstance(ignore, str) else set(ignore or ())
         pts = [0.0, self.playhead]
         for c in self.project.clips:
-            if c.id != ignore:
+            if c.id not in skip:
                 pts += [c.start, c.end]
         return pts
 
     def snap(self, t, ignore=None, also=()):
-        """Snap t (and optionally t+offset for each offset in ``also``) to nearby edges / playhead."""
+        """Snap t (and optionally t+offset for each offset in ``also``) to nearby edges / playhead.
+        ``ignore`` is a clip id or a collection of clip ids whose edges are not snap targets."""
         if not self.snap_on or not self.project:
             return t
         tol = SNAP_PX / self.pps
@@ -233,9 +238,18 @@ class TimelineCanvas(QWidget):
             return
         if self.selected != c.id:
             self.select(c.id)
+        ripple = self.tool == "ripple"
+        if ripple and zone == "body":
+            return                                  # ripple only acts on clip edges
+        if self.tool == "slip":
+            if self.project.media[c.media_id].kind == "image":
+                self.statusMessage.emit("Slip needs a video or audio clip (images have no source range).")
+                return
+            zone = "slip"
         self._drag = dict(id=c.id, zone=zone, grab=self.x2t(pos.x()) - c.start, start0=c.start, dur0=c.duration,
                           track0=c.track, start=c.start, dur=c.duration, track=c.track, moved=False,
-                          press=pos)
+                          press=pos, ripple=ripple, in0=c.in_point, t0=self.x2t(pos.x()), shift=0.0)
+        self._drag["in"] = c.in_point               # live in-point while slipping
 
     def mouseMoveEvent(self, e):
         if not self.project:
@@ -254,13 +268,31 @@ class TimelineCanvas(QWidget):
             if self.tool == "select":
                 self.setCursor(Qt.SizeHorCursor if zone in ("left", "right") else
                                Qt.OpenHandCursor if zone == "body" else Qt.ArrowCursor)
+            elif self.tool == "ripple":
+                self.setCursor(Qt.SplitHCursor if zone in ("left", "right") else Qt.ArrowCursor)
+            elif self.tool == "slip":
+                self.setCursor(Qt.SizeHorCursor if c else Qt.ArrowCursor)
             return
         if not d["moved"] and (pos - d["press"]).manhattanLength() < 3:
             return
         d["moved"] = True
         c = self.project.clip(d["id"])
         t = self.x2t(pos.x())
-        if d["zone"] == "body":
+        if d["zone"] == "slip":
+            lo, hi = self.project.slip_limits(c.id)
+            d["in"] = min(max(d["in0"] - (t - d["t0"]), lo), hi)       # content follows the cursor
+        elif d["ripple"]:
+            # clips that will shift are not snap targets (they move with the edge)
+            skip = {c.id} | {o.id for o in self.project.track_clips(c.track) if o.start >= c.end - 1e-9}
+            lo, hi = self.project.ripple_limits(c.id, d["zone"])
+            edge = min(max(self.snap(t, ignore=skip), lo), hi)
+            if d["zone"] == "left":
+                delta = edge - c.start
+                d["dur"], d["shift"] = c.duration - delta, -delta
+            else:
+                d["dur"], d["shift"] = edge - c.start, edge - c.end
+            d["start"] = c.start
+        elif d["zone"] == "body":
             start = self.snap(t - d["grab"], ignore=c.id, also=(c.duration,))
             track = self.track_at(pos.y())
             m = self.project.media[c.media_id]
@@ -291,7 +323,14 @@ class TimelineCanvas(QWidget):
         if not d or not d["moved"]:
             self.invalidate()
             return
-        if d["zone"] == "body":
+        if d["zone"] == "slip":
+            if abs(d["in"] - d["in0"]) > 1e-6:
+                self.clipSlipped.emit(d["id"], d["in"])
+        elif d["ripple"]:
+            if abs(d["shift"]) > 1e-6:
+                edge = d["start0"] + (d["dur0"] - d["dur"]) if d["zone"] == "left" else d["start0"] + d["dur"]
+                self.clipRippled.emit(d["id"], d["zone"], edge)
+        elif d["zone"] == "body":
             if abs(d["start"] - d["start0"]) > 1e-6 or d["track"] != d["track0"]:
                 self.clipMoved.emit(d["id"], d["track"], d["start"])
         elif d["zone"] == "left":
@@ -445,13 +484,26 @@ class TimelineCanvas(QWidget):
             t += step
         p.restore()
 
+    def _ripple_shift(self, c):
+        """Preview offset (seconds) for clips that follow the one being ripple-trimmed."""
+        d = self._drag
+        if d and d["moved"] and d["ripple"] and d["id"] != c.id and c.track == d["track0"] \
+                and c.start >= d["start0"] + d["dur0"] - 1e-9:
+            return d["shift"]
+        return 0.0
+
     def _draw_clip(self, p, c):
         T = theme.T
         d = self._drag if (self._drag and self._drag["id"] == c.id and self._drag["moved"]) else None
         m = self.project.media.get(c.media_id)
         if m is None:
             return
-        r = self.clip_rect(c, d["start"] if d else None, d["dur"] if d else None, d["track"] if d else None)
+        shift = self._ripple_shift(c)
+        if d:
+            r = self.clip_rect(c, d["start"], d["dur"], d["track"])
+        else:
+            r = self.clip_rect(c, c.start + shift if shift else None)
+        in_point = d["in"] if d and d["zone"] == "slip" else c.in_point
         if r.right() < HEADER_W or r.left() > self.width():
             return
         col = QColor(KIND_COLORS.get(m.kind, "#888"))
@@ -485,7 +537,7 @@ class TimelineCanvas(QWidget):
             x += max(0, int((HEADER_W - x) // 4)) * 4
             i = 0
             while x < min(r.right(), self.width() + 4):
-                h = amp * (0.35 + 0.65 * abs(math.sin((x + c.in_point * self.pps) * 0.09) * math.cos((x) * 0.031)))
+                h = amp * (0.35 + 0.65 * abs(math.sin((x + in_point * self.pps) * 0.09) * math.cos((x) * 0.031)))
                 p.drawLine(QPointF(x, mid - h), QPointF(x, mid + h))
                 x += 4
                 i += 1
@@ -502,6 +554,17 @@ class TimelineCanvas(QWidget):
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(QColor("white") if sel else QColor(0, 0, 0, 60), 2 if sel else 1))
         p.drawPath(path)
+        if d and d["zone"] == "slip":     # live in-point read-out while slipping
+            label = f"Slip  in {in_point:.2f}s  ({in_point - d['in0']:+.2f}s)"
+            fm = QFontMetrics(p.font())
+            w = min(r.width() - 8, fm.horizontalAdvance(label) + 16)
+            if w > 30:
+                pill = QRectF(r.center().x() - w / 2, r.center().y() - 2, w, 18)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(0, 0, 0, 170))
+                p.drawRoundedRect(pill, 9, 9)
+                p.setPen(QColor("white"))
+                p.drawText(pill, Qt.AlignCenter, fm.elidedText(label, Qt.ElideRight, int(w - 8)))
         if sel and r.width() > 20:        # trim handles
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 255, 255, 200))

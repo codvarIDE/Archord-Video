@@ -1,4 +1,4 @@
-"""Venma Video design system (shared look with Venma): warm paper tones, clay accent, serif headings, line icons.
+"""Venma Video design system (shared look with Venma): warm paper tones, charcoal accent, serif headings, line icons.
 
 One place for every colour token, the global Qt stylesheet, and the icon set.
 """
@@ -10,14 +10,14 @@ from PyQt5.QtSvg import QSvgRenderer
 LIGHT = dict(
     bg="#FAF9F5", surface="#FFFFFF", panel="#F5F4ED", sunken="#EFEDE4",
     border="#E6E3D8", border_strong="#D3CFC0", text="#141413", muted="#73726C",
-    faint="#A8A69C", accent="#D97757", accent_hover="#C6613F", accent_soft="#F7E6DD",
+    faint="#A8A69C", accent="#3B3A37", accent_hover="#262523", accent_soft="#E1DFD5",
     on_accent="#FFFFFF", canvas="#EDEBE2", checker1="#E3E0D5", checker2="#F2F0E8",
 )
 DARK = dict(
     bg="#1F1E1D", surface="#2B2A28", panel="#262524", sunken="#1A1918",
     border="#3A3835", border_strong="#4B4944", text="#F0EEE6", muted="#A3A198",
-    faint="#6F6D66", accent="#D97757", accent_hover="#E78F70", accent_soft="#3F2D26",
-    on_accent="#FFFFFF", canvas="#161615", checker1="#242321", checker2="#2D2C2A",
+    faint="#6F6D66", accent="#D8D5CB", accent_hover="#EFECE3", accent_soft="#3A3835",
+    on_accent="#1F1E1D", canvas="#161615", checker1="#242321", checker2="#2D2C2A",
 )
 T = dict(LIGHT)          # live tokens (mutated by set_theme)
 NAME = "light"
@@ -86,6 +86,8 @@ _P = {
  "tools": '<path d="m14 7 3-3a2.8 2.8 0 1 1 4 4l-3 3"/><path d="m2 22 7-7"/><path d="M5 19 2 22"/><path d="m19 15 2 2-7 7-2-2Z"/>',
  "chevrons_right": '<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>',
  "chevrons_left": '<polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/>',
+ "ripple": '<path d="M8 4v16"/><path d="M8 12h6"/><polyline points="11.5 9.5 14 12 11.5 14.5"/><rect x="17" y="7" width="4" height="10" rx="1"/>',
+ "slip": '<rect x="3" y="6" width="18" height="12" rx="2"/><line x1="7" y1="12" x2="17" y2="12"/><polyline points="10 9.5 7.5 12 10 14.5"/><polyline points="14 9.5 16.5 12 14 14.5"/>',
  "split": '<rect width="18" height="18" x="3" y="3" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/>',
  "transform": '<rect x="5" y="5" width="14" height="14" stroke-dasharray="3 2"/><rect x="2.5" y="2.5" width="3" height="3"/><rect x="10.5" y="2.5" width="3" height="3"/><rect x="18.5" y="2.5" width="3" height="3"/><rect x="2.5" y="10.5" width="3" height="3"/><rect x="18.5" y="10.5" width="3" height="3"/><rect x="2.5" y="18.5" width="3" height="3"/><rect x="10.5" y="18.5" width="3" height="3"/><rect x="18.5" y="18.5" width="3" height="3"/>',
 }
@@ -117,7 +119,7 @@ def get_app_icon_path():
 
 
 def app_icon():
-    """Window/taskbar icon: uses assets/venma.ico if present, otherwise generated clay rounded tile."""
+    """Window/taskbar icon: uses assets/venma.ico if present, otherwise generated charcoal rounded tile."""
     ico_path = get_app_icon_path()
     if ico_path:
         return QIcon(ico_path)

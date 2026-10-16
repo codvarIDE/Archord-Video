@@ -217,6 +217,71 @@ class Project:
         new_end = max(min(new_end, hi), c.start + MIN_CLIP)
         c.duration = new_end - c.start
 
+    # ── ripple trim ──
+    def ripple_limits(self, clip_id, side):
+        """(lowest, highest) edge time a ripple trim of ``side`` ("left" | "right") may reach.
+
+        Neighbours don't limit a ripple (they shift out of the way); only the media length and
+        MIN_CLIP do. Images can be extended freely.
+        """
+        c = self.clip(clip_id)
+        m = self.media[c.media_id]
+        if side == "left":
+            lo = float("-inf") if m.kind == "image" else c.start - c.in_point
+            return lo, c.end - MIN_CLIP
+        hi = float("inf") if m.kind == "image" else c.start + (m.duration - c.in_point)
+        return c.start + MIN_CLIP, hi
+
+    def ripple_trim(self, clip_id, side, edge):
+        """Trim a clip edge and shift every later clip on the same track by the change in length.
+
+        ``left``: the clip's start stays put and its head is trimmed/extended (the in-point moves).
+        ``right``: the tail is trimmed/extended. Returns the shift applied to the later clips
+        (negative = they moved earlier), or 0.0 if nothing changed.
+        """
+        c = self.clip(clip_id)
+        m = self.media[c.media_id]
+        lo, hi = self.ripple_limits(clip_id, side)
+        edge = min(max(edge, lo), hi)
+        old_end = c.end
+        later = [o for o in self.track_clips(c.track, clip_id) if o.start >= old_end - 1e-9]
+        if side == "left":
+            delta = edge - c.start               # >0 trims the head, <0 extends it
+            if abs(delta) < 1e-9:
+                return 0.0
+            if m.kind != "image":
+                c.in_point += delta
+            c.duration -= delta
+            shift = -delta
+        else:
+            shift = edge - old_end
+            if abs(shift) < 1e-9:
+                return 0.0
+            c.duration = edge - c.start
+        for o in later:
+            o.start = max(0.0, o.start + shift)
+        return shift
+
+    # ── slip ──
+    def slip_limits(self, clip_id):
+        """(min, max) in-point for a slip. Images have no source range, so they can't slip."""
+        c = self.clip(clip_id)
+        m = self.media[c.media_id]
+        if m.kind == "image":
+            return 0.0, 0.0
+        return 0.0, max(0.0, m.duration - c.duration)
+
+    def slip(self, clip_id, in_point):
+        """Change which part of the source plays without moving the clip or changing its length.
+        Returns True if the in-point changed."""
+        c = self.clip(clip_id)
+        lo, hi = self.slip_limits(clip_id)
+        new = min(max(in_point, lo), hi)
+        if abs(new - c.in_point) < 1e-9:
+            return False
+        c.in_point = new
+        return True
+
     def move(self, clip_id, track, start):
         c = self.clip(clip_id)
         m = self.media[c.media_id]

@@ -152,6 +152,8 @@ class MainWindow(QMainWindow):
         self.tool_group = QActionGroup(self)
         self.tool_actions = {}
         for tid, title, key, icon in (("select", "Selection Tool (V)", "V", "move"),
+                                      ("ripple", "Ripple Edit Tool (B) — drag a clip edge; later clips follow", "B", "ripple"),
+                                      ("slip", "Slip Tool (Y) — drag a clip to change which part of the source plays", "Y", "slip"),
                                       ("razor", "Razor Tool (C) — click a clip to cut", "C", "razor"),
                                       ("hand", "Hand Tool (H) — pan the timeline", "H", "hand"),
                                       ("zoom", "Zoom Tool (Z) — click to zoom, Alt-click to zoom out", "Z", "zoom")):
@@ -181,6 +183,8 @@ class MainWindow(QMainWindow):
         ob.clear()
         hints = {
             "select": "Select: drag clips to move · drag clip edges to trim · drag from the Media tab to add",
+            "ripple": "Ripple Edit: drag a clip edge — later clips on the track shift so no gap is left",
+            "slip": "Slip: drag inside a clip to change which part of the source plays (position and length stay)",
             "razor": "Razor: click a clip to cut it at that point  (S cuts at the playhead)",
             "hand": "Hand: drag to pan the timeline  (or middle-mouse drag)",
             "zoom": "Zoom: click to zoom in · Alt+click to zoom out  (Ctrl+wheel anywhere)",
@@ -258,6 +262,9 @@ class MainWindow(QMainWindow):
         c.clipSelected.connect(self._on_selected)
         c.clipMoved.connect(self._on_clip_moved)
         c.clipTrimmed.connect(self._on_clip_trimmed)
+        c.clipRippled.connect(self._on_clip_rippled)
+        c.clipSlipped.connect(self._on_clip_slipped)
+        c.statusMessage.connect(lambda msg: self.statusBar().showMessage(msg, 4000))
         c.splitRequested.connect(self._on_split_requested)
         c.mediaDropped.connect(self._on_media_dropped)
         self.engine.timeChanged.connect(self._on_time)
@@ -374,6 +381,14 @@ class MainWindow(QMainWindow):
     def _on_clip_trimmed(self, cid, side, edge):
         (self.project.trim_left if side == "left" else self.project.trim_right)(cid, edge)
         self.commit("Trim Clip")
+
+    def _on_clip_rippled(self, cid, side, edge):
+        if self.project.ripple_trim(cid, side, edge):
+            self.commit("Ripple Trim")
+
+    def _on_clip_slipped(self, cid, in_point):
+        if self.project.slip(cid, in_point):
+            self.commit("Slip Clip")
 
     def _on_split_requested(self, cid, t):
         if self.project.split(cid, t):
@@ -633,7 +648,8 @@ class MainWindow(QMainWindow):
     def toggle_theme(self):
         theme.set_theme(QApplication.instance(), "dark" if theme.NAME == "light" else "light")
         self.a_theme.setIcon(theme.icon("sun" if theme.NAME == "dark" else "moon", 20))
-        for tid, icon in (("select", "move"), ("razor", "razor"), ("hand", "hand"), ("zoom", "zoom")):
+        for tid, icon in (("select", "move"), ("ripple", "ripple"), ("slip", "slip"), ("razor", "razor"),
+                          ("hand", "hand"), ("zoom", "zoom")):
             self.tool_actions[tid].setIcon(theme.icon(icon, 20))
         for a, ic in ((self.a_open, "open"), (self.a_save, "save"), (self.a_import, "import"), (self.a_undo, "undo"),
                       (self.a_redo, "redo"), (self.a_zin, "zoom_in"), (self.a_zout, "zoom_out"), (self.a_fit, "fit"),

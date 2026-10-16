@@ -3,7 +3,7 @@
 [![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
 
 A video editor built with the same design language and workspace layout as Venma (PyQt5):
-warm paper/clay theme, vertical tool palette on the left, context options bar on top, tabbed
+warm paper/charcoal theme, vertical tool palette on the left, context options bar on top, tabbed
 side panels, light/dark mode. Currently **v0.1** (initial version).
 
 ## Quick start
@@ -32,7 +32,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 ## What it does
 - **Media bin**: import video, audio and images (button, `Ctrl+I`, or drag files onto the window), thumbnails, drag onto the timeline or double-click to append at the playhead.
 - **Timeline**: 2 video tracks (V2 on top of V1) + 2 audio tracks, ruler, playhead scrubbing, snapping, zoom, scroll.
-- **Editing**: move (also between tracks), trim by dragging clip edges, split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, unlimited-ish undo/redo (100 steps) with a History panel.
+- **Editing**: move (also between tracks), trim by dragging clip edges, **Ripple Edit tool** (trim an edge and later clips on the track follow, so no gap is left), **Slip tool** (change which part of the source plays without moving or resizing the clip), split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, unlimited-ish undo/redo (100 steps) with a History panel.
 - **Clip properties**: volume (0–200 %), opacity, brightness, contrast, saturation.
 - **Preview**: program monitor with transport (play/pause, frame step, start/end) and timecode. Decoded by FFmpeg in background QThreads (no QtMultimedia video / codec packs needed), so it never shows a black screen; sound plays through QAudioOutput.
 - **Export**: MP4 (H.264 + AAC) or WebM (VP9 + Opus), quality High/Medium/Low, at the project resolution and frame rate. Layers are composited by track order with opacity; all audio is mixed.
@@ -41,7 +41,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 ## Shortcuts
 | Key | Action |
 |---|---|
-| `V` / `C` / `H` / `Z` | Select / Razor / Hand / Zoom tool |
+| `V` / `B` / `Y` / `C` / `H` / `Z` | Select / Ripple Edit / Slip / Razor / Hand / Zoom tool |
 | `Space` | Play / pause |
 | `Left` / `Right` | Previous / next frame |
 | `Home` / `End` | Go to start / end |
