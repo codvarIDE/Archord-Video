@@ -270,12 +270,21 @@ class PreviewView(QWidget):
                 props = c.props_at(t_clip) if hasattr(c, "props_at") else {}
                 opacity = props.get("opacity", c.opacity)
                 rotation = props.get("rotation", getattr(c, "rotation", 0.0))
+                p.save()
+                if hasattr(c, "has_animation") and c.has_animation():
+                    av = c.anim_values(t_clip)                  # In / Out / Combo animation on top of the clip's own transform
+                    ctr = box.center()
+                    p.translate(av["dx"] * frame.width(), av["dy"] * frame.height())
+                    p.translate(ctr)
+                    p.rotate(av["rotation"])
+                    p.scale(av["scale"], av["scale"])
+                    p.translate(-ctr)
+                    opacity *= av["opacity"]
                 if c.title is not None:
                     draw_title(p, frame, c.title, opacity)
                 else:
                     img = self.layer_images.get(c.id)
                     if img is not None and not img.isNull():
-                        p.save()
                         p.setRenderHint(QPainter.SmoothPixmapTransform)
                         p.setRenderHint(QPainter.Antialiasing)
                         p.setOpacity(max(0.0, min(1.0, opacity)))
@@ -285,7 +294,7 @@ class PreviewView(QWidget):
                             p.rotate(rotation)
                             p.translate(-ctr)
                         p.drawImage(box, img)
-                        p.restore()
+                p.restore()
             p.setClipping(False)
         self._paint_overlay(p, r)
 
@@ -706,7 +715,7 @@ class PreviewEngine(QObject):
     def _lsize(self, c):
         """Pixel size layer ``c`` is decoded at (its fitted size; independent of position, so moving is free)."""
         m = self.project.media[c.media_id]
-        return ft.layer_size(m.width, m.height, self._pw, self._ph, c.scale)
+        return ft.layer_size(m.width, m.height, self._pw, self._ph, c.max_scale())
 
     def _vkey(self, c):
         m = self.project.media[c.media_id]

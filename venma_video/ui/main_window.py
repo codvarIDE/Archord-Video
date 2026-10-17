@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
 
 from . import theme
 from ..core import ffmpeg_tools as ft
+from ..core import animation as anim_core
 from ..core import voiceover as vo_core
 from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS
 from .timeline import TimelineWidget, format_tc
@@ -45,6 +46,8 @@ class MainWindow(QMainWindow):
         self._live_timer.timeout.connect(lambda: self.engine.refresh())
         self._edit_timer = QTimer(self, singleShot=True, interval=500)
         self._edit_timer.timeout.connect(lambda: self.commit("Edit Clip"))
+        self._anim_stop = QTimer(self, singleShot=True)           # ends the short preview played after picking an animation
+        self._anim_stop.timeout.connect(self._stop_animation_preview)
 
         self.view = PreviewView()
         self.engine = PreviewEngine(self.view, self)
@@ -101,7 +104,9 @@ class MainWindow(QMainWindow):
         self.a_split2 = A("Split at Playhead (alt)", self.split_at_playhead, "Ctrl+K")
         self.a_delete = A("&Delete Clip", lambda: self.delete_selected(False), "Delete", "trash")
         self.a_ripple = A("&Ripple Delete", lambda: self.delete_selected(True), "Shift+Delete", "ripple_delete")
-        self.a_keyframe = A("Add &Keyframe", self.add_keyframe_at_playhead, "Alt+K", "keyframe")
+        self.a_keyframe = A("Add / Remove &Keyframe", self.add_keyframe_at_playhead, "Alt+K", "keyframe")
+        self.a_kf_prev = A("Previous Keyframe", lambda: self._goto_keyframe(-1), "Alt+Left")
+        self.a_kf_next = A("Next Keyframe", lambda: self._goto_keyframe(1), "Alt+Right")
         self.a_play = A("&Play / Pause", self.engine.toggle, "Space", "play")
         self.a_start = A("Go to &Start", lambda: self.engine.seek(0), "Home", "skip_back")
         self.a_end = A("Go to &End", lambda: self.engine.seek(self.project.duration()), "End", "skip_fwd")
@@ -222,7 +227,7 @@ class MainWindow(QMainWindow):
         for title, items in (
                 ("File", (self.a_new, self.a_open, self.a_save, self.a_saveas, None, self.a_import, self.a_settings,
                           None, self.a_quit)),
-                ("Edit", (self.a_undo, self.a_redo, None, self.a_split, self.a_delete, self.a_ripple, None, self.a_keyframe)),
+                ("Edit", (self.a_undo, self.a_redo, None, self.a_split, self.a_delete, self.a_ripple, None, self.a_keyframe, self.a_kf_prev, self.a_kf_next)),
                 ("Insert", (self.a_title, self.a_lower, self.a_subtitle, None, self.a_record, None, self.a_layer,
                             self.a_atrack, self.a_prune))):
             sub = menu.addMenu(title)
@@ -441,6 +446,12 @@ class MainWindow(QMainWindow):
         self.props.keyframeAdded.connect(self._on_keyframe_add)
         self.props.keyframeRemoved.connect(self._on_keyframe_remove)
         self.props.keyframesCleared.connect(self._on_keyframes_clear)
+        self.props.keyframeToggleRequested.connect(self._on_keyframe_toggle)
+        self.props.keyframeSeek.connect(self._seek_to_keyframe)
+        c.keyframeSelected.connect(lambda cid, t: self._seek_to_keyframe(t, cid))
+        c.keyframeMoved.connect(self._on_keyframe_moved)
+        c.keyframeDeleteRequested.connect(self._on_keyframe_delete)
+        self.props.animationEdited.connect(self._on_animation)
 
     # ── environment ──────────────────────────────────────────────────────────
     def _check_environment(self):
@@ -735,19 +746,16 @@ class MainWindow(QMainWindow):
         if self.engine.playing:
             self.engine.pause()                         # editing a picture is done on a still frame
         t_clip = max(0.0, self.engine.t - c.start)
+        # CapCut behaviour: once a clip has keyframes, moving / resizing it on a frame that has no keyframe
+        # creates one right there, and on a frame that has one it updates that keyframe. The picture can
+        # therefore be placed anywhere between two keyframes and the motion bends through that new point.
+        had = len(c.keyframes)
+        c.edit_at(t_clip, **vals)
         if c.keyframes:
-            # CapCut behavior: when clip has keyframes, moving or resizing in preview updates
-            # the nearest keyframe (if within 0.15s) or creates a new keyframe at current playhead!
-            kf = c.keyframe_at(t_clip, tol=0.15)
-            if kf is not None:
-                kf.values.update(vals)
-            else:
-                c.set_keyframe(t_clip, **vals)
+            self.props.set_playhead_clip_time(t_clip)
             self.props.set_keyframes(c.keyframes)
-            self.timeline.canvas.invalidate()
-        else:
-            for k, v in vals.items():
-                setattr(c, k, v)
+            if len(c.keyframes) != had:
+                self.timeline.canvas.invalidate()        # a new diamond appeared
         self.dirty = True
         self.props.set_clip(c, self.project.media.get(c.media_id), self.project.fps)   # keep the sliders in sync
         self.view.update()                              # the selection box follows the mouse at once
@@ -787,6 +795,10 @@ class MainWindow(QMainWindow):
 
     def delete_selected(self, ripple):
         sid = self.timeline.canvas.selected
+        kf = self.timeline.canvas.sel_kf
+        if sid and kf is not None and kf[0] == sid and not ripple:      # a selected keyframe diamond goes first
+            self._on_keyframe_delete(sid, kf[1])
+            return
         if not sid or self._refuse_locked(sid):
             return
         self.timeline.canvas.select(None)
@@ -801,15 +813,17 @@ class MainWindow(QMainWindow):
         if self._refuse_locked(sid):
             self._update_clip_panel()                    # put the sliders back
             return
-        setattr(c, attr, value)
-        # If the clip has keyframes and property is animatable, also update nearest keyframe if within 0.1s of playhead
         if c.keyframes and attr in KEYFRAMED_PROPS:
+            # CapCut behaviour: with keyframes on the clip, a slider change at the playhead updates the keyframe
+            # there, or creates one if the playhead is between keyframes.
             t_clip = max(0.0, self.engine.t - c.start)
-            kf = c.keyframe_at(t_clip, tol=0.1)
-            if kf is not None:
-                kf.values[attr] = float(value)
-                self.props.set_keyframes(c.keyframes)
+            had = len(c.keyframes)
+            c.edit_at(t_clip, **{attr: value})
+            self.props.set_keyframes(c.keyframes)
+            if len(c.keyframes) != had:
                 self.timeline.canvas.invalidate()
+        else:
+            setattr(c, attr, value)
         self.dirty = True
         self.engine.refresh()
         self._edit_timer.start()
@@ -842,7 +856,7 @@ class MainWindow(QMainWindow):
         c = self.project.clip(sid) if sid else None
         if not c or self._refuse_locked(sid):
             return
-        if c.remove_keyframe(t_clip, tol=0.1):
+        if c.remove_keyframe(t_clip, tol=0.05):
             self.props.set_keyframes(c.keyframes)
             self.timeline.canvas.invalidate()
             self.commit(f"Remove Keyframe @ {t_clip:.2f}s")
@@ -861,12 +875,116 @@ class MainWindow(QMainWindow):
         self.timeline.canvas.invalidate()
         self.commit("Clear Keyframes")
 
+    def _on_keyframe_toggle(self, t_clip):
+        """The diamond next to a slider / Alt+K: remove the keyframe under the playhead, or add one."""
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if not c or self._refuse_locked(sid):
+            return
+        t_clip = min(max(0.0, t_clip), c.duration)
+        what = c.toggle_keyframe(t_clip)
+        self.timeline.canvas.sel_kf = None
+        self.props.set_keyframes(c.keyframes)
+        self.timeline.canvas.invalidate()
+        self.commit(f"{'Add' if what == 'added' else 'Remove'} Keyframe @ {t_clip:.2f}s")
+
+    def _on_keyframe_moved(self, cid, old_t, new_t):
+        """A keyframe diamond was dragged along its clip in the timeline."""
+        c = self.project.clip(cid)
+        if c is None or self.project.track_locked(c.track):
+            return
+        kf = c.keyframe_at(old_t, 1e-3)
+        if kf is None or not c.move_keyframe(kf, new_t):
+            return
+        self.timeline.canvas.sel_kf = (cid, kf.t)
+        self.props.set_keyframes(c.keyframes)
+        self.commit(f"Move Keyframe to {kf.t:.2f}s")
+        self.timeline.canvas.sel_kf = (cid, kf.t)         # (commit rebuilds the clips; keep the diamond selected)
+        self.timeline.canvas.invalidate()
+
+    def _on_keyframe_delete(self, cid, t):
+        c = self.project.clip(cid)
+        if c is None or self._refuse_locked(cid):
+            return
+        if c.remove_keyframe(t, tol=1e-3):
+            self.timeline.canvas.sel_kf = None
+            self.props.set_keyframes(c.keyframes)
+            self.commit(f"Delete Keyframe @ {t:.2f}s")
+
+    def _seek_to_keyframe(self, t_clip, cid=None):
+        """Put the playhead on a keyframe of the selected clip (or of clip ``cid``)."""
+        sid = cid or self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if c is None:
+            return
+        self.engine.pause()
+        self.engine.seek(c.start + min(max(0.0, t_clip), c.duration))
+
+    def _goto_keyframe(self, direction):
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if c is None or not c.keyframes:
+            self.statusBar().showMessage("Select a clip with keyframes first.", 3000)
+            return
+        t_clip = max(0.0, self.engine.t - c.start)
+        kf = c.next_keyframe(t_clip) if direction > 0 else c.prev_keyframe(t_clip)
+        if kf is not None:
+            self._seek_to_keyframe(kf.t, sid)
+
+    # ── In / Out / Combo animations ──────────────────────────────────────────
+    def _on_animation(self, slot, name, seconds):
+        """The Animation panel picked a preset (or "" = none) or moved the duration slider."""
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if c is None:
+            return
+        if self._refuse_locked(sid):
+            self._update_clip_panel()
+            return
+        name = name or None
+        only_duration = name is not None and c.animation.get(slot) == name
+        if not self.project.set_animation(sid, slot, name, seconds):
+            self._update_clip_panel()                    # nothing changed: put the chips back as they were
+            return
+        if only_duration:                                # dragging the duration slider: commit once it settles
+            self.dirty = True
+            self.timeline.canvas.invalidate()
+            self.view.update()
+            self._edit_timer.start()
+            return
+        what = anim_core.preset_label(slot, name) if name else "None"
+        self.commit(f"Animation: {what}" if name else f"Remove {slot.title()} Animation")
+        if name:
+            self._preview_animation(self.project.clip(sid), slot)
+
+    def _preview_animation(self, c, slot):
+        """Play the animation that was just picked, the way CapCut does, then stop on its own."""
+        if c is None or not c.animation.get(slot):
+            return
+        d_in, d_out = anim_core.durations(c.animation, c.duration)
+        if slot == "in":
+            t0, span = c.start, min(c.duration, d_in + 0.7)
+        elif slot == "out":
+            t0 = max(c.start, c.end - d_out - 0.5)
+            span = c.end - t0
+        else:
+            t0, span = c.start, min(c.duration, 3.0)
+        self.engine.pause()
+        self.engine.seek(t0)
+        self.engine.play()
+        self._anim_stop.start(int((span + 0.1) * 1000))
+
+    def _stop_animation_preview(self):
+        if self.engine.playing:
+            self.engine.pause()
+
     def _on_reset_props(self):
         sid = self.timeline.canvas.selected
         c = self.project.clip(sid) if sid else None
         if c and not self._refuse_locked(sid):
             for k, v in CLIP_DEFAULTS.items():
                 setattr(c, k, v)
+            c.animation = {}
             c.clear_keyframes()
             self.props.set_keyframes(c.keyframes)
             self.timeline.canvas.invalidate()

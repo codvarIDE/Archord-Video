@@ -38,6 +38,51 @@ no source range. The placeholder is hidden from the media bin via `Project.libra
   receives them as `text_images` and overlays them like looped still images, with opacity.
 - **Sizes** are pixels at a 1080-high frame and scale with the frame; position is a 0..1 fraction.
 
+## Clip animations (In / Out / Combo)
+
+CapCut-style presets stored on the clip as `Clip.animation`, e.g. `{"in": "pop", "in_dur": 0.6, "out": "fade"}` or
+`{"combo": "pulse"}`. Picking a Combo replaces In / Out and vice versa (`animation.set_slot`). They are layered on top of
+the clip's own position / scale / rotation / opacity and its keyframes, never written into them.
+
+- **One definition, two renderers.** `core/animation.py` defines every preset as arithmetic expressions in FFmpeg's
+  expression language (`t` = seconds into the clip). The preview evaluates the same strings in Python
+  (`animation.values_at`, used by `PreviewView.paintEvent`), and the exporter hands them to FFmpeg
+  (`animation.expressions`), so both always agree. Only `+ - * /`, `sin cos abs min max clip` and `PI` are allowed.
+- **Export.** An animated clip always takes the "placed" path (`ffmpeg_tools.has_transform`). `_anim_filters` returns
+  `rotate`, `fade` and `scale` groups that must be applied in that order: a time-varying `scale` (`eval=frame`)
+  changes the frame size per frame, so it has to be the last filter before the overlay. Slides/shakes/pans add a
+  per-frame offset to the overlay's x / y in `_place`.
+- **Model.** `Project.set_animation` / `clear_animation` (lock-aware). `Project.split` gives the In to the left half
+  and the Out to the right half; a Combo continues on both.
+- **UI.** The Animation section of `PropertiesPanel` (In / Out / Combo tabs, preset chips, duration slider) emits
+  `animationEdited`; `MainWindow._on_animation` commits it and plays a short preview. The timeline draws small ramps
+  on clips that have an In / Out animation and a bar for a Combo.
+- **Tests.** `tests/test_animation.py`, including one that renders every preset with the real FFmpeg.
+
+## Keyframes (CapCut style)
+
+A clip's `keyframes` are `Keyframe(t, **values)` objects (`t` = seconds from the clip start; values for `pos_x`,
+`pos_y`, `scale`, `rotation`, `opacity`), always sorted by `t`. Between two keyframes every property is linear, and
+it is held before the first / after the last one (`Clip.interpolate` for the preview, `ffmpeg_tools._kf_expr` for
+the export, which builds the same curve as an FFmpeg expression).
+
+- **Auto keyframes.** Once a clip has keyframes, `Clip.edit_at(t, **values)` is how every edit is made (dragging or
+  resizing in the preview, the sliders): on a frame that already has a keyframe it updates it, anywhere else it
+  creates a new keyframe holding the whole look at that moment. Without keyframes it edits the clip's own properties.
+- **Diamond / Alt+K.** `Clip.toggle_keyframe` adds a keyframe at the playhead or removes the one under it.
+  `KF_SNAP` (0.02 s) is "the same spot": the playhead is *on* a keyframe within that distance, and two keyframes
+  can't be that close.
+- **Timeline.** The diamonds on a clip can be clicked (the playhead jumps there), dragged along the clip
+  (`Clip.move_keyframe`, clamped between the neighbours and the clip ends, snaps to the playhead), right-clicked
+  (go to / delete) and deleted with Delete. Alt+Left / Alt+Right (and the arrows in the Keyframes panel) jump to the
+  previous / next keyframe (`Clip.prev_keyframe` / `next_keyframe`).
+- **Trim and split keep the motion on the picture.** `Clip.rebase_keyframes` shifts the keyframes when the head is
+  trimmed and drops the ones that fall outside, first putting a keyframe on the new edge so nothing jumps.
+  `Project.split` puts a keyframe holding the same value on the cut in both halves.
+- **Export.** Position, scale, rotation and opacity keyframes all render. Scale is applied last (`eval=frame`), the
+  picture being fitted at its biggest keyframe scale so zooming in stays sharp; opacity uses `geq` (slower) only when
+  it really changes. `tests/test_keyframes.py` renders these with the real FFmpeg and checks pixels.
+
 ## Layers and the preview
 
 - **Stacking order.** In a typed project every picture layer (video / photo / text clips) is ordered by when it

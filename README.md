@@ -32,6 +32,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 ## What it does
 - **Media bin**: import video, audio and images (button, `Ctrl+I`, or drag files onto the window), thumbnails, drag onto the timeline or double-click to append at the playhead.
 - **Layers, CapCut style**: drop or import anything and it lands on a layer, created for you when needed. Picture layers (video, photos and text can share one) stack **in the order they were added**: the first layer is at the bottom (`Video`, then `Layer 1`, `Layer 2`…), every new one goes on top, and the **last added layer is always in front** (numbered last). A clip only joins an existing layer if it is free there and nothing added earlier would cover it; otherwise a new layer is created above. Dropping on a busy layer inserts a new one right above it. Audio tracks always stay below the picture layers. `Layer` / `Audio` buttons, the dashed *new layer* strips and the right-click menu on a layer header add or reorder layers by hand; `Menu > Insert > Remove Empty Layers` tidies up. Projects saved by older versions keep their old layers.
+- **Animations, CapCut style**: select a clip (video, photo or title) and open **Animation** in the Properties panel. Pick an **In** animation (Fade, Zoom In/Out, Pop, Slide ×4, Rise, Fall, Spin, Swing), an **Out** animation, or a looping **Combo** (Pulse, Heartbeat, Swing, Float, Bounce, Shake, Spin, Slow Zoom, Pan). The duration slider sets how long an In / Out lasts, a short preview plays as soon as you pick one, and the exact same motion is rendered on export. Animations stack on top of your own position / scale / keyframes. Clips show small ramps on the timeline where an In / Out runs.
 - **Unlimited files**: import any number of files at once (one undo step per batch); select several in the media bin (`Ctrl`/`Shift`-click) and drag or add them together.
 - **Timeline**: ruler, playhead scrubbing, snapping, zoom, scroll.
 - **Editing**: move (also between tracks), trim by dragging clip edges, **Ripple Edit tool** (trim an edge and later clips on the track follow, so no gap is left), **Slip tool** (change which part of the source plays without moving or resizing the clip), split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, undo/redo (100 steps).
@@ -94,7 +95,7 @@ venma_video/
 │   ├── panels.py         # Media bin, Text presets, Details (properties), New-project and Export dialogs
 │   ├── docks.py          # CollapsibleSection and small toolbar helpers
 │   └── theme.py          # shared Venma design tokens, icons and stylesheet
-└── assets/           # app icon (venma.ico) and other static files
+└── assets/           # Venma logo (venma_cut_violet.ico) and other static files (a packaged copy lives in venma_video/assets/)
 tests/                # unittest/pytest suite
 docs/ARCHITECTURE.md  # deeper notes
 ```

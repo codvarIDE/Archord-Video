@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 
+from . import animation
+
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff", ".gif"}
 AUDIO_EXTS = {".mp3", ".wav", ".aac", ".m4a", ".flac", ".ogg", ".opus", ".wma"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".mpg", ".mpeg", ".ts", ".3gp"}
@@ -146,73 +148,154 @@ def _num(x):
     return f"{x:.4f}".rstrip("0").rstrip(".") or "0"
 
 
+def _n6(x):
+    return f"{x:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def has_keyframes(clip):
+    return clip is not None and bool(getattr(clip, "keyframes", None))
+
+
+def _kf_expr(clip, prop, mul=1.0, var="t"):
+    """FFmpeg expression of ``t`` (clip-local seconds) for a keyframed property, or ``None`` when no keyframe sets it.
+
+    Linear between the keyframes and *held* before the first / after the last one, exactly like
+    ``Clip.interpolate`` does for the preview. ``mul`` converts units (e.g. a fraction of the frame to pixels);
+    ``var`` is the time variable of the filter that evaluates it (``t`` for most, ``T`` for ``geq``)."""
+    ks = [k for k in getattr(clip, "keyframes", None) or [] if prop in k.values]
+    if not ks:
+        return None
+    vals = [k.values[prop] * mul for k in ks]
+    if len(ks) == 1 or all(abs(v - vals[0]) < 1e-9 for v in vals):
+        return _n6(vals[0])
+    expr = _n6(vals[-1])
+    for j in range(len(ks) - 2, -1, -1):
+        t0, t1 = ks[j].t, ks[j + 1].t
+        v0, v1 = vals[j], vals[j + 1]
+        seg = f"({_n6(v0)}+({_n6(v1 - v0)})*({var}-{_n6(t0)})/{_n6(max(1e-4, t1 - t0))})"
+        expr = f"if(lte({var},{_n6(t1)}),{seg},{expr})"
+    return f"if(lte({var},{_n6(ks[0].t)}),{_n6(vals[0])},{expr})"
+
+
+def _is_const(expr):
+    try:
+        float(expr)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _max_kf_scale(clip):
+    vals = [k.values["scale"] for k in getattr(clip, "keyframes", None) or [] if "scale" in k.values]
+    return max(vals) if vals else clip.scale
+
+
+def _kf_opacity_filter(clip):
+    """Filter for the clip's opacity: a plain ``colorchannelmixer`` when it is constant, ``geq`` (per frame)
+    when opacity is keyframed. ``None`` when the clip is fully opaque."""
+    ex = _kf_expr(clip, "opacity")
+    if ex is None:
+        return f"colorchannelmixer=aa={_num(clip.opacity)}" if clip.opacity < 0.999 else None
+    if _is_const(ex):
+        return f"colorchannelmixer=aa={_num(min(1.0, max(0.0, float(ex))))}" if float(ex) < 0.999 else None
+    g = _kf_expr(clip, "opacity", var="T")
+    return f"format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*min(1,max(0,{g}))'"
+
+
+def has_animation(clip):
+    """True when the clip has an In / Out / Combo animation (it is then always drawn through the placed path)."""
+    return clip is not None and bool(getattr(clip, "animation", None)) and clip.has_animation()
+
+
 def has_transform(clip):
-    """True when a picture clip has been moved, resized or rotated away from "fitted, centred"."""
-    return (clip is not None and getattr(clip, "title", None) is None
+    """True when a clip has been moved, resized or rotated away from "fitted, centred", or is animated."""
+    if clip is None:
+        return False
+    if has_animation(clip):
+        return True
+    if has_keyframes(clip) and getattr(clip, "title", None) is None:
+        return True
+    return (getattr(clip, "title", None) is None
             and (abs(clip.scale - 1) > 1e-3 or abs(clip.pos_x - 0.5) > 1e-3 or abs(clip.pos_y - 0.5) > 1e-3
                  or abs(getattr(clip, "rotation", 0.0)) > 1e-3))
+
+
+def _anim_filters(clip):
+    """FFmpeg filters for the clip's animation, in three groups that the caller must apply in this order:
+
+    ``rotate``  turn the fitted picture (the canvas is made large enough for any angle),
+    ``fade``    In / Out opacity fades,
+    ``scale``   the animated zoom. It MUST come last: a time-varying ``scale`` changes the frame size
+                per frame, and downstream filters (``rotate``, ``eq`` ...) are configured for the first size.
+
+    All are expressions of ``t`` (seconds since the clip started)."""
+    ex = animation.expressions(getattr(clip, "animation", None), clip.duration) if has_animation(clip) else None
+    out = dict(rotate=[], fade=[], scale=[])
+    kf_scale = _kf_expr(clip, "scale")          # keyframed zoom: the picture is fitted at its biggest scale, shrunk per frame
+    if kf_scale is not None and not _is_const(kf_scale):
+        r = f"({kf_scale})/{_n6(max(1e-3, _max_kf_scale(clip)))}"
+        S = f"({r})*({ex['scale']})" if ex is not None and ex["scale"] != "1" else r
+        out["scale"].append(f"scale=w='max(2,trunc(iw*({S})/2)*2)':h='max(2,trunc(ih*({S})/2)*2)'"
+                            f":eval=frame:flags=bilinear")
+        if ex is not None:
+            ex = dict(ex, scale="1")            # already folded into S
+    if ex is None:
+        return out
+    if ex["rotation"] != "0":
+        a = f"({ex['rotation']})*PI/180"
+        out["rotate"].append(f"rotate='{a}':ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=black@0")
+    if ex["fade_in"] > 0:
+        out["fade"].append(f"fade=t=in:st=0:d={_num(ex['fade_in'])}:alpha=1")
+    if ex["fade_out"] > 0:
+        out["fade"].append(f"fade=t=out:st={_num(max(0.0, clip.duration - ex['fade_out']))}"
+                           f":d={_num(ex['fade_out'])}:alpha=1")
+    if ex["scale"] != "1":
+        S = ex["scale"]
+        out["scale"].append(f"scale=w='max(2,trunc(iw*({S})/2)*2)':h='max(2,trunc(ih*({S})/2)*2)'"
+                            f":eval=frame:flags=bilinear")
+    return out
 
 
 def _fit(W, H, clip, flags=""):
     """Filters that scale a picture to fit the frame, times the clip's scale (no padding when transformed)."""
     s = clip.scale if has_transform(clip) else 1.0
+    kf_scale = _kf_expr(clip, "scale")
+    if kf_scale is not None:
+        s = _max_kf_scale(clip) if not _is_const(kf_scale) else float(kf_scale)
     bw, bh = max(2, int(round(W * s))), max(2, int(round(H * s)))
     chain = [f"scale={bw}:{bh}:force_original_aspect_ratio=decrease{flags}", "setsar=1", "format=rgba"]
     rot = getattr(clip, "rotation", 0.0)
-    kfs = getattr(clip, "keyframes", None)
-    if kfs and any("rotation" in kf.values for kf in kfs):
-        # Build piecewise linear interpolation expression in FFmpeg for rotation: t is in seconds (local to clip)
-        # rotate filter takes radians
-        rot_kfs = [kf for kf in kfs if "rotation" in kf.values]
-        if len(rot_kfs) == 1:
-            rad = rot_kfs[0].values["rotation"] * 3.14159265 / 180.0
-            chain.append(f"rotate='{rad}':ow='rotw({rad})':oh='roth({rad})':c=black@0")
-        elif len(rot_kfs) > 1:
-            # piecewise linear formula: if(lte(t, t1), v0 + (v1-v0)*(t-t0)/(t1-t0), ...)
-            expr = f"{rot_kfs[-1].values['rotation'] * 3.14159265 / 180.0:.5f}"
-            for j in range(len(rot_kfs) - 2, -1, -1):
-                k0, k1 = rot_kfs[j], rot_kfs[j + 1]
-                t0, t1 = k0.t, k1.t
-                v0 = k0.values["rotation"] * 3.14159265 / 180.0
-                v1 = k1.values["rotation"] * 3.14159265 / 180.0
-                dt = max(1e-4, t1 - t0)
-                seg = f"({v0:.5f}+({v1-v0:.5f})*(t-{t0:.4f})/{dt:.4f})"
-                expr = f"if(lte(t,{t1:.4f}),{seg},{expr})"
-            chain.append(f"rotate='{expr}':ow='rotw({expr})':oh='roth({expr})':c=black@0")
+    rot_kf = _kf_expr(clip, "rotation", mul=3.14159265 / 180.0)
+    if rot_kf is not None:
+        if _is_const(rot_kf):
+            rad = float(rot_kf)
+            if abs(rad) > 1e-5:
+                chain.append(f"rotate='{_n6(rad)}':ow='rotw({_n6(rad)})':oh='roth({_n6(rad)})':c=black@0")
+        else:
+            # the angle changes every frame, so the canvas is made big enough for any angle
+            chain.append(f"rotate='{rot_kf}':ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=black@0")
     elif abs(rot) > 1e-3:
         rad = rot * 3.14159265 / 180.0
         chain.append(f"rotate='{rad}':ow='rotw({rad})':oh='roth({rad})':c=black@0")
     return chain
 
 
-def _place(src, dst, W, H, clip, fps, tag, bg="black@0"):
-    """Graph lines that put the scaled picture ``src`` onto a W x H canvas, centred on the clip's position."""
-    kfs = getattr(clip, "keyframes", None)
-    has_pos_kf = kfs and any("pos_x" in kf.values or "pos_y" in kf.values for kf in kfs)
-    if has_pos_kf:
-        # Build piecewise linear interpolation expressions for X and Y in FFmpeg
-        pos_kfs = [kf for kf in kfs if "pos_x" in kf.values or "pos_y" in kf.values]
-        def _axis_expr(axis, default_val, full_dim):
-            if len(pos_kfs) == 1:
-                return _num(full_dim * pos_kfs[0].values.get(axis, default_val))
-            last_v = full_dim * pos_kfs[-1].values.get(axis, default_val)
-            expr = f"{last_v:.2f}"
-            for j in range(len(pos_kfs) - 2, -1, -1):
-                k0, k1 = pos_kfs[j], pos_kfs[j + 1]
-                t0, t1 = k0.t, k1.t
-                v0 = full_dim * k0.values.get(axis, default_val)
-                v1 = full_dim * k1.values.get(axis, default_val)
-                dt = max(1e-4, t1 - t0)
-                seg = f"({v0:.2f}+({v1-v0:.2f})*(t-{t0:.4f})/{dt:.4f})"
-                expr = f"if(lte(t,{t1:.4f}),{seg},{expr})"
-            return expr
-        px_expr = _axis_expr("pos_x", clip.pos_x, W)
-        py_expr = _axis_expr("pos_y", clip.pos_y, H)
+def _place(src, dst, W, H, clip, fps, tag, bg="black@0", animate=False):
+    """Graph lines that put the scaled picture ``src`` onto a W x H canvas, centred on the clip's position.
+
+    With ``animate`` the clip's In / Out / Combo animation offset is added to that position (per frame)."""
+    ex = animation.expressions(clip.animation, clip.duration) if animate and has_animation(clip) else None
+    off_x = f"+{W}*({ex['dx']})" if ex and ex["dx"] != "0" else ""
+    off_y = f"+{H}*({ex['dy']})" if ex and ex["dy"] != "0" else ""
+    kx, ky = _kf_expr(clip, "pos_x", mul=W), _kf_expr(clip, "pos_y", mul=H)
+    if kx is not None or ky is not None:
+        px_expr = kx if kx is not None else _num(W * clip.pos_x)
+        py_expr = ky if ky is not None else _num(H * clip.pos_y)
         return [f"color=c={bg}:s={W}x{H}:r={fps},format=rgba[bg{tag}]",
-                f"[bg{tag}][{src}]overlay=x='{px_expr}-w/2':y='{py_expr}-h/2':format=auto:shortest=1[{dst}]"]
+                f"[bg{tag}][{src}]overlay=x='({px_expr}){off_x}-w/2':y='({py_expr}){off_y}-h/2':format=auto:shortest=1[{dst}]"]
     px, py = _num(W * clip.pos_x), _num(H * clip.pos_y)
     return [f"color=c={bg}:s={W}x{H}:r={fps},format=rgba[bg{tag}]",
-            f"[bg{tag}][{src}]overlay=x='{px}-w/2':y='{py}-h/2':format=auto:shortest=1[{dst}]"]
+            f"[bg{tag}][{src}]overlay=x='{px}{off_x}-w/2':y='{py}{off_y}-h/2':format=auto:shortest=1[{dst}]"]
 
 
 def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Medium", text_images=None):
@@ -258,13 +341,17 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             chain = [f"fps={fps}"] + _fit(W, H, c)
             if not moved:
                 chain.append(f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black@0")
+            anim = _anim_filters(c)
+            chain += anim["rotate"]
             if abs(c.brightness) > 1e-3 or abs(c.contrast - 1) > 1e-3 or abs(c.saturation - 1) > 1e-3:
                 chain.append(f"eq=brightness={_num(c.brightness)}:contrast={_num(c.contrast)}:saturation={_num(c.saturation)}")
-            if c.opacity < 0.999:
-                chain.append(f"colorchannelmixer=aa={_num(c.opacity)}")
+            op = _kf_opacity_filter(c)
+            if op:
+                chain.append(op)
+            chain += anim["fade"] + anim["scale"]
             if moved:
                 filters.append(f"[{i}:v]{','.join(chain)}[t{i}]")
-                filters += _place(f"t{i}", f"p{i}", W, H, c, fps, f"e{i}")
+                filters += _place(f"t{i}", f"p{i}", W, H, c, fps, f"e{i}", animate=True)
                 filters.append(f"[p{i}]setpts=PTS-STARTPTS+{_num(c.start)}/TB[v{i}]")
             else:
                 chain.append(f"setpts=PTS-STARTPTS+{_num(c.start)}/TB")

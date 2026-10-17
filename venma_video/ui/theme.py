@@ -94,18 +94,22 @@ def _svg_pixmap(name, color, size=20, sw=1.75):
     return pm
 
 
+ICON_FILE = "venma_cut_violet.ico"
+
+
 def get_app_icon_path():
-    """Returns absolute path to venma_video/assets/venma.ico if it exists, else None."""
+    """Absolute path to the Venma logo (.ico): packaged copy first, then the repo-level assets/ folder."""
     pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for base in (pkg, os.getcwd()):
-        cand = os.path.join(base, "assets", "venma.ico")
+    for base in (os.path.join(pkg, "assets"), os.path.join(os.path.dirname(pkg), "assets"),
+                 os.path.join(os.getcwd(), "assets")):
+        cand = os.path.join(base, ICON_FILE)
         if os.path.isfile(cand):
             return cand
     return None
 
 
 def app_icon():
-    """Window/taskbar icon: uses assets/venma.ico if present, otherwise generated violet rounded tile."""
+    """Window/taskbar icon: uses the Venma logo (assets/venma_cut_violet.ico) if present, otherwise generated violet rounded tile."""
     ico_path = get_app_icon_path()
     if ico_path:
         return QIcon(ico_path)
@@ -124,10 +128,10 @@ def app_icon():
 
 
 def app_pixmap(size=64):
-    """Returns a QPixmap of the application icon at the requested size."""
-    ico = app_icon()
-    return ico.pixmap(size, size)
-
+    """Returns a crisp (device-pixel-ratio aware) QPixmap of the application logo at ``size`` logical px."""
+    pm = app_icon().pixmap(size * 2, size * 2)
+    pm.setDevicePixelRatio(2)
+    return pm
 
 
 try:

@@ -9,6 +9,8 @@ import itertools
 import json
 import os
 
+from . import animation
+
 MIN_CLIP = 0.1
 IMAGE_DEFAULT_DURATION = 5.0
 PROJECT_VERSION = 1
@@ -77,6 +79,9 @@ CLIP_DEFAULTS = dict(volume=1.0, opacity=1.0, brightness=0.0, contrast=1.0, satu
 
 # Properties that can be keyframed (animated over time within a clip).
 KEYFRAMED_PROPS = ("pos_x", "pos_y", "scale", "rotation", "opacity")
+# Two keyframes closer than this (seconds) are "the same spot": the playhead counts as standing ON a keyframe
+# when it is this close (about half a frame), and a keyframe cannot be dropped onto / dragged over another one.
+KF_SNAP = 0.02
 
 
 class Keyframe:
@@ -134,6 +139,8 @@ class Clip:
         kf_list = props.get("keyframes") or []
         self.keyframes = sorted([Keyframe.from_dict(k) if isinstance(k, dict) else k
                                  for k in kf_list], key=lambda k: k.t)
+        # CapCut-style In / Out / Combo animation preset(s), layered on top of the clip's own transform.
+        self.animation = animation.clean(props.get("animation"))
 
     @property
     def end(self):
@@ -147,6 +154,8 @@ class Clip:
             d["title"] = dict(self.title)
         if self.keyframes:
             d["keyframes"] = [kf.to_dict() for kf in self.keyframes]
+        if self.animation:
+            d["animation"] = dict(self.animation)
         return d
 
     @staticmethod
@@ -204,11 +213,29 @@ class Clip:
         base.update(self.interpolate(t_clip))
         return base
 
+    # ── In / Out / Combo animation ──────────────────────────────────────────
+    def has_animation(self):
+        return animation.is_active(self.animation)
+
+    def anim_values(self, t_clip):
+        """Extra dx / dy / scale / rotation / opacity the clip's animation adds ``t_clip`` seconds in."""
+        return animation.values_at(self.animation, self.duration, t_clip)
+
     # ── keyframe CRUD ───────────────────────────────────────────────────────
-    def set_keyframe(self, t_clip, **values):
-        """Add or update a keyframe at ``t_clip`` with the given property values. Keeps the list sorted."""
-        t_clip = float(t_clip)
-        kf = self.keyframe_at(t_clip)
+    def has_keyframes(self):
+        return bool(self.keyframes)
+
+    def max_scale(self):
+        """The biggest scale the clip ever has (its own, or any keyframe's): the preview decodes at that size."""
+        vals = [k.values["scale"] for k in self.keyframes if "scale" in k.values]
+        return max(vals) if vals else self.scale
+
+    def set_keyframe(self, t_clip, tol=KF_SNAP, **values):
+        """Add or update a keyframe at ``t_clip`` with the given property values. Keeps the list sorted.
+
+        A keyframe already within ``tol`` seconds is updated instead of getting a twin next to it."""
+        t_clip = min(max(0.0, float(t_clip)), self.duration)
+        kf = self.keyframe_at(t_clip, tol)
         if kf is not None:
             kf.values.update({k: float(v) for k, v in values.items() if k in KEYFRAMED_PROPS})
         else:
@@ -216,6 +243,32 @@ class Clip:
             self.keyframes.append(kf)
             self.keyframes.sort(key=lambda k: k.t)
         return kf
+
+    def edit_at(self, t_clip, **values):
+        """CapCut-style edit of an animated clip: change ``values`` at ``t_clip``.
+
+        Once a clip has keyframes, moving / resizing / rotating it on a frame that has no keyframe yet
+        automatically creates one there (it records the whole look at that moment, so nothing else jumps);
+        on a frame that already has one it just updates that keyframe. Without keyframes the clip's own
+        properties change. Returns the keyframe touched, or None for a plain edit."""
+        if not self.keyframes:
+            for k, v in values.items():
+                if k in KEYFRAMED_PROPS:
+                    setattr(self, k, float(v))
+            return None
+        snap = self.props_at(t_clip)
+        snap.update({k: float(v) for k, v in values.items() if k in KEYFRAMED_PROPS})
+        return self.set_keyframe(t_clip, **snap)
+
+    def toggle_keyframe(self, t_clip, tol=KF_SNAP):
+        """The diamond button: remove the keyframe under the playhead, or record one there.
+        Returns ``"added"`` or ``"removed"``."""
+        if self.keyframe_at(t_clip, tol) is not None:
+            self.remove_keyframe(t_clip, tol)
+            return "removed"
+        snap = self.props_at(min(max(0.0, t_clip), self.duration))
+        self.set_keyframe(t_clip, **snap)
+        return "added"
 
     def remove_keyframe(self, t_clip, tol=0.05):
         """Remove the keyframe nearest to ``t_clip`` if within ``tol`` seconds."""
@@ -225,7 +278,7 @@ class Clip:
             return True
         return False
 
-    def keyframe_at(self, t_clip, tol=0.05):
+    def keyframe_at(self, t_clip, tol=KF_SNAP):
         """Return the keyframe nearest to ``t_clip`` within ``tol`` seconds, or None."""
         t_clip = float(t_clip)
         best, best_d = None, tol
@@ -235,9 +288,54 @@ class Clip:
                 best, best_d = kf, d
         return best
 
+    def prev_keyframe(self, t_clip):
+        """The last keyframe strictly before ``t_clip`` (the playhead's own keyframe doesn't count), or None."""
+        found = [k for k in self.keyframes if k.t < float(t_clip) - KF_SNAP]
+        return found[-1] if found else None
+
+    def next_keyframe(self, t_clip):
+        """The first keyframe strictly after ``t_clip``, or None."""
+        found = [k for k in self.keyframes if k.t > float(t_clip) + KF_SNAP]
+        return found[0] if found else None
+
+    def keyframe_limits(self, kf):
+        """(lowest, highest) clip-local time ``kf`` may be dragged to: inside the clip and between its
+        neighbours (a keyframe keeps its place in the order, like CapCut)."""
+        i = self.keyframes.index(kf)
+        lo = self.keyframes[i - 1].t + KF_SNAP if i > 0 else 0.0
+        hi = self.keyframes[i + 1].t - KF_SNAP if i + 1 < len(self.keyframes) else self.duration
+        return lo, max(lo, hi)
+
+    def move_keyframe(self, kf, new_t):
+        """Drag a keyframe to another time (clamped to :meth:`keyframe_limits`). Returns True if it moved."""
+        lo, hi = self.keyframe_limits(kf)
+        new_t = min(max(float(new_t), lo), hi)
+        if abs(new_t - kf.t) < 1e-9:
+            return False
+        kf.t = new_t
+        return True
+
     def clear_keyframes(self):
         """Remove all keyframes from this clip."""
         self.keyframes.clear()
+
+    def rebase_keyframes(self, shift, new_duration):
+        """Keep the motion attached to the picture after a trim.
+
+        ``shift`` is how much later (+) or earlier (-) the clip's new start is in old clip time; keyframes move by
+        ``-shift``. Keyframes that fall outside ``[0, new_duration]`` are dropped, but a keyframe is first
+        placed on the new edge with the value the motion had there, so the picture doesn't jump."""
+        if not self.keyframes:
+            return
+        old = list(self.keyframes)
+        edge0 = self.props_at(shift) if shift > 1e-9 else None
+        edge1 = self.props_at(shift + new_duration) if shift + new_duration < old[-1].t - 1e-9 else None
+        kept = [Keyframe(k.t - shift, **k.values) for k in old if -1e-9 <= k.t - shift <= new_duration + 1e-9]
+        if edge0 is not None and (not kept or kept[0].t > KF_SNAP):
+            kept.insert(0, Keyframe(0.0, **edge0))
+        if edge1 is not None and (not kept or kept[-1].t < new_duration - KF_SNAP):
+            kept.append(Keyframe(new_duration, **edge1))
+        self.keyframes = sorted(kept, key=lambda k: k.t)
 
 
 class Project:
@@ -687,6 +785,28 @@ class Project:
         c.title.update(style)
         return True
 
+    def set_animation(self, clip_id, slot, name, duration=None):
+        """Set (or clear, with ``name`` None) the clip's "in" / "out" / "combo" animation preset.
+
+        Choosing a Combo replaces In / Out and vice versa, as in CapCut. Returns True if anything changed."""
+        c = self.clip(clip_id)
+        if c is None or self.track_locked(c.track) or slot not in animation.SLOTS:
+            return False
+        if name and name not in (animation.COMBO_PRESETS if slot == "combo" else animation.IN_PRESETS):
+            return False
+        new = animation.set_slot(c.animation, slot, name, duration)
+        if new == c.animation:
+            return False
+        c.animation = new
+        return True
+
+    def clear_animation(self, clip_id):
+        c = self.clip(clip_id)
+        if c is None or self.track_locked(c.track) or not c.animation:
+            return False
+        c.animation = {}
+        return True
+
     # ── editing ──
     def split(self, clip_id, t):
         """Split a clip at timeline time t. Returns the new right-hand clip or None."""
@@ -698,10 +818,17 @@ class Project:
                      title=None if c.title is None else dict(c.title),
                      **{k: getattr(c, k) for k in CLIP_DEFAULTS})
         # Distribute keyframes: left keeps those before the cut, right gets those at/after (offset adjusted)
-        left_kfs = [kf for kf in c.keyframes if kf.t < split_local]
-        right_kfs = [Keyframe(kf.t - split_local, **kf.values) for kf in c.keyframes if kf.t >= split_local]
+        # (like CapCut, both halves get a keyframe on the cut holding the value the motion had there, so the
+        # picture doesn't jump and each half keeps animating up to / from the cut)
+        at_cut = c.props_at(split_local) if c.keyframes else None
+        left_kfs = [kf for kf in c.keyframes if kf.t < split_local - KF_SNAP]
+        right_kfs = [Keyframe(kf.t - split_local, **kf.values) for kf in c.keyframes if kf.t > split_local + KF_SNAP]
+        if at_cut is not None:
+            left_kfs.append(Keyframe(split_local, **at_cut))
+            right_kfs.insert(0, Keyframe(0.0, **at_cut))
         c.keyframes = left_kfs
         right.keyframes = right_kfs
+        c.animation, right.animation = animation.split_animation(c.animation, split_local, c.end - t)
         c.duration = t - c.start
         self.clips.append(right)
         return right
@@ -734,6 +861,7 @@ class Project:
         c.in_point += delta
         c.duration -= delta
         c.start = new_start
+        c.rebase_keyframes(delta, c.duration)
 
     def trim_right(self, clip_id, new_end):
         c = self.clip(clip_id)
@@ -742,6 +870,7 @@ class Project:
         _, hi = self.trim_limits(clip_id)
         new_end = max(min(new_end, hi), c.start + MIN_CLIP)
         c.duration = new_end - c.start
+        c.rebase_keyframes(0.0, c.duration)
 
     # ── ripple trim ──
     def ripple_limits(self, clip_id, side):
@@ -780,12 +909,14 @@ class Project:
             if m.kind not in STILL_KINDS:
                 c.in_point += delta
             c.duration -= delta
+            c.rebase_keyframes(delta, c.duration)
             shift = -delta
         else:
             shift = edge - old_end
             if abs(shift) < 1e-9:
                 return 0.0
             c.duration = edge - c.start
+            c.rebase_keyframes(0.0, c.duration)
         for o in later:
             o.start = max(0.0, o.start + shift)
         return shift

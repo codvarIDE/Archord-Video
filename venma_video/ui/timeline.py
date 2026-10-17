@@ -6,6 +6,7 @@ from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QPainterPath, QFont, QFo
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QScrollBar, QMenu, QToolTip
 
 from . import theme
+from ..core import animation as anim_core
 from ..core.project import MIN_CLIP, NEW_BOTTOM, NEW_TOP, STILL_KINDS
 
 MIME_MEDIA = "application/x-venma-media"
@@ -65,6 +66,9 @@ class TimelineCanvas(QWidget):
     trackMoveRequested = pyqtSignal(int, int)    # track index, -1 (up) / +1 (down)
     trackFlagToggled = pyqtSignal(int, str)      # track index, "hidden" | "locked" | "muted"
     trackReordered = pyqtSignal(int, int)        # layer dragged from index, to index
+    keyframeSelected = pyqtSignal(str, float)    # clip id, clip-local time: a keyframe diamond was clicked (playhead jumps to it)
+    keyframeMoved = pyqtSignal(str, float, float)   # clip id, old clip-local time, new clip-local time (diamond dragged)
+    keyframeDeleteRequested = pyqtSignal(str, float)   # clip id, clip-local time
     viewChanged = pyqtSignal()
     statusMessage = pyqtSignal(str)
 
@@ -80,6 +84,8 @@ class TimelineCanvas(QWidget):
         self.tool = "select"
         self.snap_on = True
         self._drag = None           # dict describing the active drag
+        self.sel_kf = None                 # (clip id, clip-local time) of the selected keyframe diamond
+        self._kfdrag = None                # live drag of a keyframe diamond
         self._scrub = False
         self._pan = None
         self._drop = None           # (track, time) while dragging media over
@@ -121,6 +127,8 @@ class TimelineCanvas(QWidget):
         self.invalidate()
 
     def select(self, clip_id):
+        if clip_id != self.selected:
+            self.sel_kf = None
         self.selected = clip_id
         self.clipSelected.emit(clip_id)
         self.invalidate()
@@ -332,6 +340,55 @@ class TimelineCanvas(QWidget):
                 return c, "body"
         return None, None
 
+    # ── keyframe diamonds ────────────────────────────────────────────────────
+    KF_HIT = 7                                   # px: how close a click must be to a diamond to grab it
+
+    @staticmethod
+    def _kf_y(r):
+        return r.center().y() + 6
+
+    def kf_hit(self, pos):
+        """(clip, keyframe) of the diamond under ``pos`` (front-most clip first), or (None, None)."""
+        if not self.project or pos.x() < HEADER_W:
+            return None, None
+        for c in reversed(self.project.clips):
+            if not c.keyframes:
+                continue
+            r = self.clip_rect(c)
+            near_row = abs(pos.y() - self._kf_y(r)) <= self.KF_HIT + 2
+            if not near_row or not (r.left() - self.KF_HIT <= pos.x() <= r.right() + self.KF_HIT):
+                continue
+            best, best_d = None, self.KF_HIT + 1
+            for kf in c.keyframes:
+                d = abs(pos.x() - self.t2x(c.start + kf.t))
+                if d < best_d:
+                    best, best_d = kf, d
+            if best is not None:
+                return c, best
+        return None, None
+
+    def _kf_shown_t(self, c, kf):
+        """Where a diamond is drawn: at its dragged position while it is being dragged."""
+        d = self._kfdrag
+        if d is not None and d["id"] == c.id and abs(kf.t - d["t0"]) < 1e-6:
+            return d["t"]
+        return kf.t
+
+    def _kf_is_selected(self, c, kf):
+        k = self.sel_kf
+        return k is not None and k[0] == c.id and abs(k[1] - kf.t) < 1e-4
+
+    def _kf_menu(self, gpos, c, kf):
+        menu = QMenu(self)
+        a_seek = menu.addAction("Go to keyframe")
+        a_del = menu.addAction("Delete keyframe")
+        a_del.setEnabled(not self.project.track_locked(c.track))
+        act = menu.exec_(gpos)
+        if act is a_seek:
+            self.keyframeSelected.emit(c.id, kf.t)
+        elif act is a_del:
+            self.keyframeDeleteRequested.emit(c.id, kf.t)
+
     # ── mouse ────────────────────────────────────────────────────────────────
     def mousePressEvent(self, e):
         if not self.project:
@@ -345,6 +402,14 @@ class TimelineCanvas(QWidget):
         if e.button() == Qt.RightButton:
             if pos.x() < HEADER_W and pos.y() >= RULER_H:
                 self._header_menu(e.globalPos(), pos)
+            else:
+                kc, kf = self.kf_hit(pos)
+                if kc is not None:
+                    if self.selected != kc.id:
+                        self.select(kc.id)
+                    self.sel_kf = (kc.id, kf.t)
+                    self.invalidate()
+                    self._kf_menu(e.globalPos(), kc, kf)
             return
         if e.button() != Qt.LeftButton:
             return
@@ -370,6 +435,17 @@ class TimelineCanvas(QWidget):
         if self.tool == "zoom":
             self.zoom_by(0.8 if e.modifiers() & Qt.AltModifier else 1.25, pos.x())
             return
+        if self.tool == "select":
+            kc, kf = self.kf_hit(pos)
+            if kc is not None:                                  # grab a keyframe diamond (click = go to it, drag = move it)
+                if self.selected != kc.id:
+                    self.select(kc.id)
+                self.sel_kf = (kc.id, kf.t)
+                self._kfdrag = dict(id=kc.id, t0=kf.t, t=kf.t, press=pos, moved=False,
+                                    locked=self.project.track_locked(kc.track))
+                self.keyframeSelected.emit(kc.id, kf.t)
+                self.invalidate()
+                return
         c, zone = self.hit(pos)
         if self.tool == "razor":
             if c and self.project.track_locked(c.track):
@@ -429,6 +505,27 @@ class TimelineCanvas(QWidget):
         if self._scrub:
             self._seek_to_x(pos.x())
             return
+        kd = self._kfdrag
+        if kd is not None:                                     # dragging a keyframe diamond along its clip
+            if not kd["moved"] and (pos - kd["press"]).manhattanLength() < 3:
+                return
+            if kd["locked"]:
+                return
+            c = self.project.clip(kd["id"])
+            kf = c.keyframe_at(kd["t0"], 1e-3) if c is not None else None
+            if kf is None:
+                return
+            kd["moved"] = True
+            t = self.x2t(pos.x()) - c.start
+            if self.snap_on:                                   # stick to the playhead
+                tol = SNAP_PX / self.pps
+                if abs(t - (self.playhead - c.start)) < tol:
+                    t = self.playhead - c.start
+            lo, hi = c.keyframe_limits(kf)
+            kd["t"] = min(max(t, lo), hi)
+            self.setCursor(Qt.SizeHorCursor)
+            self.invalidate()
+            return
         d = self._drag
         if d is None and pos.x() < HEADER_W and pos.y() >= RULER_H:
             self.setCursor(Qt.PointingHandCursor if self.switch_at(pos) else
@@ -436,7 +533,9 @@ class TimelineCanvas(QWidget):
             return
         if d is None:
             c, zone = self.hit(pos)
-            if self.tool == "select":
+            if self.tool == "select" and self.kf_hit(pos)[0] is not None:
+                self.setCursor(Qt.PointingHandCursor)
+            elif self.tool == "select":
                 self.setCursor(Qt.SizeHorCursor if zone in ("left", "right") else
                                Qt.OpenHandCursor if zone == "body" else Qt.ArrowCursor)
             elif self.tool == "ripple":
@@ -505,6 +604,14 @@ class TimelineCanvas(QWidget):
             return
         if self._scrub:
             self._scrub = False
+            return
+        kd, self._kfdrag = self._kfdrag, None
+        if kd is not None:
+            self.set_tool(self.tool)
+            if kd["moved"] and abs(kd["t"] - kd["t0"]) > 1e-6:
+                self.sel_kf = (kd["id"], kd["t"])
+                self.keyframeMoved.emit(kd["id"], kd["t0"], kd["t"])
+            self.invalidate()
             return
         d, self._drag = self._drag, None
         if not d or not d["moved"]:
@@ -905,6 +1012,21 @@ class TimelineCanvas(QWidget):
         p.setPen(QColor("white"))
         p.drawText(QRectF(r.left() + 6, r.top(), max(0, r.width() - 10), 14), Qt.AlignVCenter | Qt.AlignLeft,
                    fm.elidedText(label, Qt.ElideRight, int(max(0, r.width() - 12))))
+        if c.animation:                                   # In / Out ramps (or a Combo bar) along the clip's bottom edge
+            d_in, d_out = anim_core.durations(c.animation, c.duration)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 105))
+            bot = r.bottom() - 1
+            if d_in > 0:
+                w = min(r.width(), d_in * self.pps)
+                p.drawPolygon(QPolygonF([QPointF(r.left(), bot), QPointF(r.left() + w, bot),
+                                         QPointF(r.left() + w, bot - 9)]))
+            if d_out > 0:
+                w = min(r.width(), d_out * self.pps)
+                p.drawPolygon(QPolygonF([QPointF(r.right() - w, bot), QPointF(r.right(), bot),
+                                         QPointF(r.right() - w, bot - 9)]))
+            if c.animation.get("combo"):
+                p.drawRect(QRectF(r.left(), bot - 3, r.width(), 3))
         if self.project.track_hidden(c.track):            # hidden layer: the clip fades into the row
             veil = QColor(T["surface"]); veil.setAlpha(165)
             p.fillRect(r, veil)
@@ -927,19 +1049,21 @@ class TimelineCanvas(QWidget):
         if c.keyframes:
             p.save()
             p.setClipPath(path)
-            kf_y = r.center().y() + 6
+            kf_y = self._kf_y(r)
             for kf in c.keyframes:
-                kx = self.t2x(c.start + kf.t)
-                if r.left() - 6 <= kx <= r.right() + 6:
+                kx = self.t2x(c.start + self._kf_shown_t(c, kf))
+                if r.left() - 8 <= kx <= r.right() + 8:
+                    on = self._kf_is_selected(c, kf)
+                    rad = 7 if on else 6
                     diamond = QPolygonF([
-                        QPointF(kx,     kf_y - 6),
-                        QPointF(kx + 6, kf_y),
-                        QPointF(kx,     kf_y + 6),
-                        QPointF(kx - 6, kf_y),
+                        QPointF(kx,       kf_y - rad),
+                        QPointF(kx + rad, kf_y),
+                        QPointF(kx,       kf_y + rad),
+                        QPointF(kx - rad, kf_y),
                     ])
-                    # Dark drop-shadow/border for high visibility against any video clip color
+                    # Dark border for high visibility against any video clip colour; the selected one is white
                     p.setPen(QPen(QColor(0, 0, 0, 220), 1.5))
-                    p.setBrush(QColor("#FFCC00"))
+                    p.setBrush(QColor("#FFFFFF") if on else QColor("#FFCC00"))
                     p.drawPolygon(diamond)
             p.restore()
 

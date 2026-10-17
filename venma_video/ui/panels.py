@@ -7,10 +7,11 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QListWidget, QListWidgetItem,
     QAbstractItemView, QComboBox, QSpinBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
     QFileDialog, QFrame, QGridLayout, QPlainTextEdit, QFontComboBox, QToolButton, QCheckBox,
-    QColorDialog, QScrollArea, QMenu,
+    QColorDialog, QScrollArea, QMenu, QSizePolicy,
 )
 
 from . import theme
+from ..core import animation as anim
 from ..core import ffmpeg_tools as ft
 from ..core.project import PRESETS, KEYFRAMED_PROPS
 from .timeline import MIME_MEDIA, format_tc
@@ -313,6 +314,9 @@ class PropertiesPanel(QWidget):
     keyframeAdded = pyqtSignal(float)          # clip-local time: record current props as a keyframe here
     keyframeRemoved = pyqtSignal(float)        # clip-local time: remove keyframe near this time
     keyframesCleared = pyqtSignal()            # clear all keyframes from the selected clip
+    keyframeToggleRequested = pyqtSignal(float)    # clip-local time: the diamond next to a slider (add here, or remove the one here)
+    keyframeSeek = pyqtSignal(float)           # clip-local time: jump the playhead to a keyframe (prev / next / list click)
+    animationEdited = pyqtSignal(str, str, float)   # slot ("in" | "out" | "combo"), preset name ("" = none), seconds
 
     # attribute -> (label, lo, hi, default, scale between slider value and attribute)
     SPEC = [
@@ -371,23 +375,39 @@ class PropertiesPanel(QWidget):
         theme.set_icon(self.b_reset, "reset", 13)
         self.b_reset.clicked.connect(self.resetRequested.emit)
         lay.addWidget(self.b_reset)
+        self._build_animation_section(lay)
 
         # ── Keyframes section ──────────────────────────────────────────────
         self.sec_kf = CollapsibleSection("Keyframes")
         kflay = self.sec_kf.body_lay
 
-        kf_btn_row = QHBoxLayout()
+        nav_row = QHBoxLayout()
+        self.b_kf_prev = QPushButton("◀")
+        self.b_kf_prev.setFixedWidth(34)
+        self.b_kf_prev.setToolTip("Jump to the previous keyframe (Alt+Left)")
+        self.b_kf_prev.clicked.connect(lambda: self._seek_keyframe(-1))
         self.b_kf_add = QPushButton(" Add Keyframe")
         theme.set_icon(self.b_kf_add, "keyframe", 13)
-        self.b_kf_add.setToolTip("Record the current position, scale, rotation and opacity as a keyframe at the playhead")
+        self.b_kf_add.setToolTip("Record the current position, scale, rotation and opacity as a keyframe at the playhead.\n"
+                                 "After that, moving / resizing / rotating the picture on any other frame adds a keyframe there by itself.")
         self.b_kf_add.clicked.connect(lambda: self.keyframeAdded.emit(self._t_clip))
+        self.b_kf_next = QPushButton("▶")
+        self.b_kf_next.setFixedWidth(34)
+        self.b_kf_next.setToolTip("Jump to the next keyframe (Alt+Right)")
+        self.b_kf_next.clicked.connect(lambda: self._seek_keyframe(1))
+        nav_row.addWidget(self.b_kf_prev)
+        nav_row.addWidget(self.b_kf_add, 1)
+        nav_row.addWidget(self.b_kf_next)
+        kflay.addLayout(nav_row)
+
+        kf_btn_row = QHBoxLayout()
         self.b_kf_remove = QPushButton("Remove")
-        self.b_kf_remove.setToolTip("Remove the keyframe nearest to the playhead")
+        self.b_kf_remove.setToolTip("Remove the keyframe under the playhead")
         self.b_kf_remove.clicked.connect(lambda: self.keyframeRemoved.emit(self._t_clip))
         self.b_kf_clear = QPushButton("Clear All")
         self.b_kf_clear.setToolTip("Remove all keyframes from this clip")
         self.b_kf_clear.clicked.connect(self.keyframesCleared.emit)
-        for b in (self.b_kf_add, self.b_kf_remove, self.b_kf_clear):
+        for b in (self.b_kf_remove, self.b_kf_clear):
             kf_btn_row.addWidget(b)
         kflay.addLayout(kf_btn_row)
 
@@ -395,6 +415,7 @@ class PropertiesPanel(QWidget):
         self.kf_list.setFixedHeight(90)
         self.kf_list.setSelectionMode(QAbstractItemView.NoSelection)
         self.kf_list.setFocusPolicy(Qt.NoFocus)
+        self.kf_list.itemClicked.connect(self._kf_item_clicked)
         kflay.addWidget(self.kf_list)
         lay.addWidget(self.sec_kf)
 
@@ -403,11 +424,25 @@ class PropertiesPanel(QWidget):
         self.set_clip(None, None, 30)
 
     def _toggle_property_kf(self, attr):
-        """When clicking the keyframe icon next to a slider, toggle keyframing."""
-        self.keyframeAdded.emit(self._t_clip)
+        """The diamond next to a slider works like CapCut's: a keyframe under the playhead is removed, otherwise one is added."""
+        self.keyframeToggleRequested.emit(self._t_clip)
+
+    def _seek_keyframe(self, direction):
+        """Jump to the previous (-1) / next (+1) keyframe of the selected clip."""
+        c = self._current_clip
+        if c is None or not c.keyframes:
+            return
+        kf = c.next_keyframe(self._t_clip) if direction > 0 else c.prev_keyframe(self._t_clip)
+        if kf is not None:
+            self.keyframeSeek.emit(kf.t)
+
+    def _kf_item_clicked(self, item):
+        t = item.data(Qt.UserRole)
+        if t is not None:
+            self.keyframeSeek.emit(float(t))
 
     def retint(self):
-        for sec in (self.text_box, self.sec_audio, self.sec_xform, self.sec_visual, self.sec_kf):
+        for sec in (self.text_box, self.sec_audio, self.sec_xform, self.sec_visual, self.sec_anim, self.sec_kf):
             sec.retint()
         theme.set_icon(self.b_reset, "reset", 13)
         theme.set_icon(self.b_kf_add, "keyframe", 13)
@@ -421,11 +456,136 @@ class PropertiesPanel(QWidget):
                 r, _ = self.rows[attr]
                 r.set_keyframe_active(False)
             return
-        kf = c.keyframe_at(self._t_clip, tol=0.08)
+        kf = c.keyframe_at(self._t_clip)
         for attr in self.rows:
             r, _ = self.rows[attr]
             if r.has_kf:
                 r.set_keyframe_active(bool(kf and attr in kf.values))
+
+    # ── animation (In / Out / Combo, CapCut style) ──────────────────────────
+    ANIM_TABS = (("in", "In"), ("out", "Out"), ("combo", "Combo"))
+
+    def _build_animation_section(self, lay):
+        self.sec_anim = CollapsibleSection("Animation")
+        v = self.sec_anim.body_lay
+        self._anim_slot = "in"
+        self._anim_btns = {}                  # preset name ("" = None) -> button of the current tab
+
+        tabs = QHBoxLayout()
+        tabs.setSpacing(0)
+        self._anim_tabs = {}
+        for slot, label in self.ANIM_TABS:
+            b = QToolButton()
+            b.setObjectName("catTab")
+            b.setText(label)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(lambda _=False, sl=slot: self._set_anim_tab(sl))
+            tabs.addWidget(b)
+            self._anim_tabs[slot] = b
+        v.addLayout(tabs)
+
+        self._anim_grid_host = QWidget()
+        self._anim_grid = QGridLayout(self._anim_grid_host)
+        self._anim_grid.setContentsMargins(0, 4, 0, 0)
+        self._anim_grid.setSpacing(5)
+        v.addWidget(self._anim_grid_host)
+
+        row = QHBoxLayout()
+        self._anim_dur_label = QLabel("Duration")
+        self._anim_dur = QSlider(Qt.Horizontal)
+        self._anim_dur.setRange(int(anim.MIN_DURATION * 10), 40)          # tenths of a second: 0.1 - 4.0 s
+        self._anim_dur.setValue(int(anim.DEFAULT_DURATION * 10))
+        self._anim_dur_val = QLabel("0.5 s")
+        self._anim_dur_val.setStyleSheet(f"color: {theme.T['muted']};")
+        self._anim_dur_val.setMinimumWidth(36)
+        self._anim_dur.valueChanged.connect(self._anim_duration_moved)
+        row.addWidget(self._anim_dur_label)
+        row.addWidget(self._anim_dur, 1)
+        row.addWidget(self._anim_dur_val)
+        self._anim_dur_row = QWidget()
+        self._anim_dur_row.setLayout(row)
+        row.setContentsMargins(0, 2, 0, 0)
+        v.addWidget(self._anim_dur_row)
+
+        self._anim_hint = QLabel("")
+        self._anim_hint.setWordWrap(True)
+        self._anim_hint.setStyleSheet(f"color: {theme.T['muted']}; font-size: 9pt;")
+        v.addWidget(self._anim_hint)
+        lay.addWidget(self.sec_anim)
+        self._rebuild_anim_presets()
+
+    def _set_anim_tab(self, slot):
+        self._anim_slot = slot
+        self._rebuild_anim_presets()
+        self._load_animation(self._current_clip)
+
+    def _rebuild_anim_presets(self):
+        """(Re)create the preset buttons of the current tab: a "None" chip followed by every preset."""
+        while self._anim_grid.count():
+            w = self._anim_grid.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._anim_btns = {}
+        entries = [("", "None")] + anim.presets(self._anim_slot)
+        for i, (name, label) in enumerate(entries):
+            b = QToolButton()
+            b.setText(label)
+            b.setCheckable(True)
+            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(30)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(lambda _=False, n=name: self._pick_animation(n))
+            self._anim_grid.addWidget(b, i // 3, i % 3)
+            self._anim_btns[name] = b
+        for col in range(3):
+            self._anim_grid.setColumnStretch(col, 1)
+
+    def _anim_seconds(self):
+        return self._anim_dur.value() / 10.0
+
+    def _pick_animation(self, name):
+        if self._loading:
+            return
+        self.animationEdited.emit(self._anim_slot, name, self._anim_seconds())
+        self._load_animation(self._current_clip)         # re-sync the chips (a re-click must not leave one unchecked)
+
+    def _anim_duration_moved(self, v):
+        self._anim_dur_val.setText(f"{v / 10.0:.1f} s")
+        if self._loading:
+            return
+        c = self._current_clip
+        name = (c.animation.get(self._anim_slot) if c is not None else None) or ""
+        if name:
+            self.animationEdited.emit(self._anim_slot, name, v / 10.0)
+
+    def _load_animation(self, clip):
+        """Show the clip's animation in the tabs / chips / duration slider without triggering edits."""
+        self._loading = True
+        try:
+            a = clip.animation if clip is not None else {}
+            for slot, b in self._anim_tabs.items():
+                b.setChecked(slot == self._anim_slot)
+                active = bool(a.get(slot))
+                b.setText(dict(self.ANIM_TABS)[slot] + (" •" if active else ""))
+            cur = a.get(self._anim_slot) or ""
+            for name, b in self._anim_btns.items():
+                b.setChecked(name == cur)
+            has_dur = self._anim_slot != "combo"
+            self._anim_dur_row.setVisible(has_dur)
+            self._anim_dur_row.setEnabled(bool(cur))
+            if has_dur:
+                d = a.get(self._anim_slot + "_dur", anim.DEFAULT_DURATION)
+                self._anim_dur.setValue(int(round(float(d) * 10)))
+                self._anim_dur_val.setText(f"{self._anim_dur.value() / 10.0:.1f} s")
+            self._anim_hint.setText(
+                "Combo animations loop for the whole clip and replace In / Out." if self._anim_slot == "combo"
+                else "Picking an In or Out animation replaces any Combo." if a.get("combo") else "")
+        finally:
+            self._loading = False
 
     # ── title (text) controls ────────────────────────────────────────────────
     def _emit_title(self, key, value):
@@ -527,11 +687,14 @@ class PropertiesPanel(QWidget):
         # Keyframe section: only for visual, non-title clips
         kf_on = on and not is_title and media is not None and media.kind in ("video", "image")
         self.sec_kf.setVisible(kf_on)
+        self.sec_anim.setVisible(on and (is_title or (media is not None and media.kind in ("video", "image"))))
+        self._load_animation(clip)
         for attr, (r, scale) in self.rows.items():
             r.setEnabled(on)
             r.setVisible(not is_title or attr == "opacity")     # titles only have opacity (their X / Y are in Text)
             if on:
-                r.set_value(getattr(clip, attr) * scale)
+                shown = clip.props_at(self._t_clip).get(attr) if clip.keyframes and attr in KEYFRAMED_PROPS else None
+                r.set_value((getattr(clip, attr) if shown is None else shown) * scale)
         self.b_reset.setEnabled(on)
         if not on:
             self.title.setText("No clip selected")
@@ -563,9 +726,10 @@ class PropertiesPanel(QWidget):
             self.kf_list.addItem("(no keyframes)")
             self._sync_kf_slider_icons()
             return
-        for kf in keyframes:
+        for i, kf in enumerate(keyframes):
             parts = ", ".join(f"{k}: {v:.3f}" for k, v in sorted(kf.values.items()))
             self.kf_list.addItem(f"{kf.t:.2f}s — {parts}")
+            self.kf_list.item(i).setData(Qt.UserRole, kf.t)
         self._sync_kf_slider_icons()
 
     def set_playhead_clip_time(self, t_clip):
