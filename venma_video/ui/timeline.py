@@ -84,6 +84,7 @@ class TimelineCanvas(QWidget):
         self._pan = None
         self._drop = None           # (track, time) while dragging media over
         self._tdrag = None          # layer being dragged by its header: dict(src, press, moved, target)
+        self.rec = None             # live voiceover take: dict(track, t0, t1, levels, step) (painted over the cache)
         self._icons = {}
         self._cache = None          # pre-rendered tracks/clips/ruler (playhead is drawn on top)
         self._cache_key = None
@@ -97,6 +98,17 @@ class TimelineCanvas(QWidget):
         """Something static changed (clips, zoom, selection, theme): re-render the cached layer."""
         self._dirty = True
         QWidget.update(self)
+
+    # ── live voiceover take ──────────────────────────────────────────────────
+    def set_recording(self, track, t0, t1, levels=(), step=0.05):
+        """Show a take being recorded on ``track`` from ``t0`` to ``t1`` (``levels``: one 0..1 peak per ``step`` s)."""
+        self.rec = dict(track=track, t0=t0, t1=max(t0, t1), levels=levels, step=step)
+        QWidget.update(self)
+
+    def clear_recording(self):
+        if self.rec is not None:
+            self.rec = None
+            QWidget.update(self)
 
     # ── data ─────────────────────────────────────────────────────────────────
     def set_project(self, project):
@@ -627,7 +639,40 @@ class TimelineCanvas(QWidget):
         p = QPainter(self)
         p.drawPixmap(0, 0, self._cache)
         p.setRenderHint(QPainter.Antialiasing)
+        self._paint_recording(p)
         self._paint_playhead(p)
+
+    def _paint_recording(self, p):
+        r = self.rec
+        if not r or not self.project or not (0 <= r["track"] < len(self.project.tracks)):
+            return
+        width = max(3.0, (r["t1"] - r["t0"]) * self.pps)
+        rect = QRectF(self.t2x(r["t0"]), self.track_y(r["track"]) + 3, width, TRACK_H - 6)
+        p.save()
+        p.setClipRect(QRectF(HEADER_W, RULER_H, self.width() - HEADER_W, self.height() - RULER_H))
+        red = QColor("#E5484D")
+        fill = QColor(red); fill.setAlpha(150)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 6, 6)
+        p.setPen(QPen(red, 1.5))
+        p.setBrush(fill)
+        p.drawPath(path)
+        p.setClipPath(path)
+        mid, half = rect.center().y(), (rect.height() - 10) / 2
+        bar = max(1.0, r["step"] * self.pps - 1)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 215))
+        for i, lv in enumerate(r["levels"]):                 # live level trace, one bar per ~50 ms of audio
+            x = self.t2x(r["t0"] + i * r["step"])
+            if x + bar < HEADER_W or x > self.width():
+                continue
+            h = max(1.0, lv * half)
+            p.drawRect(QRectF(x, mid - h, bar, 2 * h))
+        f = QFont(p.font()); f.setPointSizeF(8.5); f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor("white"))
+        p.drawText(rect.adjusted(8, 3, -6, 0), Qt.AlignLeft | Qt.AlignTop, "● REC  %.1fs" % (r["t1"] - r["t0"]))
+        p.restore()
 
     def _paint_static(self, p):
         T = theme.T

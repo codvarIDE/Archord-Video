@@ -464,6 +464,19 @@ class Project:
     def add_audio_track(self):
         return self.insert_track(len(self.tracks), "audio")
 
+    def voiceover_track(self, start):
+        """Audio track a voiceover that starts at ``start`` should be recorded onto.
+
+        The take's length isn't known yet, so the track must have nothing at or after ``start``: the first
+        unlocked, unmuted audio track that qualifies, otherwise a brand-new audio track at the bottom.
+        Returns ``(index, created)``."""
+        for i, tr in enumerate(self.tracks):
+            if tr["kind"] != "audio" or self.track_locked(i) or self.track_muted(i):
+                continue
+            if all(c.end <= start + 1e-9 for c in self.track_clips(i)):
+                return i, False
+        return self.add_audio_track(), True
+
     def can_remove_track(self, index):
         if not (0 <= index < len(self.tracks)):
             return False

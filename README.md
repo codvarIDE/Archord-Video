@@ -36,6 +36,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 - **Timeline**: ruler, playhead scrubbing, snapping, zoom, scroll.
 - **Editing**: move (also between tracks), trim by dragging clip edges, **Ripple Edit tool** (trim an edge and later clips on the track follow, so no gap is left), **Slip tool** (change which part of the source plays without moving or resizing the clip), split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, undo/redo (100 steps).
 - **Text & titles**: add a Title, Lower third or Subtitle at the playhead (`Insert` menu, the **Text** toolbar button, or `Ctrl+T`). Titles are ordinary clips on the top video track, so they move, trim, split, ripple and undo like everything else. Edit the text, font, size, bold/italic, alignment, colour, outline, background box, opacity and X/Y position in the Properties panel; they show live in the preview.
+- **Voiceover**: record from the microphone straight onto an audio track (`Ctrl+R`, the **Record** button in the timeline toolbar, or `Insert > Record Voiceover`). Pick the microphone, optionally count in 3-2-1, and the project plays (muted by default, so the speakers don't leak into the take) while you talk; a red take with a live level trace grows on the audio track from the playhead. **Stop** adds it as a normal clip (move, trim, split, volume, undo all work; one undo step removes the whole take). It goes on the first free audio track, or a new one if that would overlap something. Takes are saved as `Voiceover N.wav` in a `Voiceovers` folder next to your saved project (or the app's data folder until the project is saved). No FFmpeg or codec packs needed, and nothing is recorded until you press Record.
 - **Clip properties**: volume (0–200 %), opacity, brightness, contrast, saturation.
 - **Preview**: program monitor with transport (play/pause, frame step, start/end) and timecode. Decoded by FFmpeg in background QThreads (no QtMultimedia video / codec packs needed), so it never shows a black screen; sound plays through QAudioOutput.
 - **Export**: MP4 (H.264 + AAC) or WebM (VP9 + Opus), quality High/Medium/Low, at the project resolution and frame rate. Layers are composited by track order with opacity; all audio is mixed.
@@ -55,6 +56,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 | `Ctrl+wheel` | Zoom timeline at the cursor (plain wheel scrolls) |
 | `N` | Toggle snapping |
 | `Ctrl+T` / `Ctrl+Shift+T` / `Ctrl+Alt+T` | Add title / lower third / subtitle at the playhead |
+| `Ctrl+R` | Record a voiceover at the playhead |
 | `Ctrl+I` / `Ctrl+M` | Import / Export |
 | `Ctrl+N` `Ctrl+O` `Ctrl+S` | New / Open / Save project |
 | `Ctrl+Shift+D` | Dark / light theme |
@@ -62,6 +64,11 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 ## Known limits of v0.1
 - While paused or scrubbing, the preview stacks all visible layers (opacity and colour included); during playback it plays the topmost clip's own video and the first audio-track clip. Opacity, colour
   correction, volume boost above 100 % and mixing several audio tracks show up in the **export** only.
+- The preview plays one audio track at a time (the first audio track that has a clip at that moment). A voiceover that had
+  to go on a second audio track (because the first one is busy) is mixed in the **export**, but isn't heard in the preview
+  while the first track is sounding there.
+- Voiceover recording needs QtMultimedia too (it is part of the PyQt5 wheel) and an input device; on macOS and Windows the
+  system may ask you to allow microphone access the first time.
 - Preview audio needs QtMultimedia (PyQt5 wheel includes it). Without an audio device the preview plays silently.
 - No transitions, speed changes, keyframes, or audio waveforms yet. Titles have no animation or fades yet, and
   a title's position is set with sliders (no on-canvas dragging yet).
@@ -76,12 +83,14 @@ venma_video/
 ├── workers.py        # background QThreads: media import + export with progress
 ├── core/             # no Qt UI code — easy to test
 │   ├── project.py        # timeline model (media, clips, tracks), edits, JSON snapshots for undo
+│   ├── voiceover.py      # WAV writer, level meter maths and take naming for voiceover recording
 │   └── ffmpeg_tools.py   # locate/probe/thumbnail + the filter_complex export builder
 ├── ui/
 │   ├── main_window.py    # top bar, panels, timeline toolbar, commands
 │   ├── timeline.py       # multi-track timeline widget
 │   ├── preview.py        # preview monitor + threaded FFmpeg playback engine
 │   ├── titles.py         # Qt painter for titles, shared by the preview and the export
+│   ├── voiceover.py      # microphone capture (QAudioInput) and the Record Voiceover dialog
 │   ├── panels.py         # Media bin, Text presets, Details (properties), New-project and Export dialogs
 │   ├── docks.py          # CollapsibleSection and small toolbar helpers
 │   └── theme.py          # shared Venma design tokens, icons and stylesheet

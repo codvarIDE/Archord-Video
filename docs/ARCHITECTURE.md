@@ -65,6 +65,25 @@ when off), so they are saved in `.vvproj`, and undo/redo restores them with the 
   kind (picture layers and audio tracks never mix) and the clips follow their layer. The context-menu
   "Move up / down" still works.
 
+## Voiceover recording
+
+- **Capture.** `ui/voiceover.py::VoiceRecorder` opens a `QAudioInput` (16-bit PCM, mono if the device allows) and
+  polls it every 15 ms, emitting `chunk(bytes)`. Polling works on every audio backend. `core/voiceover.WavSink`
+  appends the chunks to `Voiceover N.wav` with the stdlib `wave` module, so recording needs no codec and no FFmpeg,
+  and `peak_level` feeds the level meter and the live trace on the timeline.
+- **Where it lands.** `Project.voiceover_track(start)` picks the audio track *before* recording starts (the take's
+  length is unknown, so the track must be empty from `start` onwards; locked and muted tracks are skipped), creating a
+  new audio track if none qualifies. `MainWindow.record_voiceover` removes that track again if the take is cancelled,
+  and otherwise adds the WAV as an `audio` `MediaItem` and `place_clip`s it, in a single `commit("Record Voiceover")`.
+- **Timing.** The dialog is modal, so the timeline can't change underneath it. When "play the project" is on it starts
+  the preview engine, waits until `PreviewEngine.is_starting()` is false (the clock only runs once the decoders are
+  ready) and only then opens the microphone, taking `engine.t` at that instant as the take's start time. The preview's
+  sound can be silenced with `PreviewEngine.set_muted` so speakers don't bleed into the microphone.
+- **Live feedback.** `TimelineCanvas.set_recording(track, t0, t1, levels)` paints the growing take over the cached
+  layer (it is never part of the cache, so it costs one repaint per tick).
+- **Tests.** `VoiceoverDialog` takes a `recorder_factory`, so `tests/test_voiceover.py` drives whole takes with a fake
+  microphone and engine; no audio hardware is needed.
+
 ## Project files
 
 `.vvproj` is JSON (`Project.to_dict()`), versioned via `PROJECT_VERSION`. Media is referenced by

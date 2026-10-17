@@ -48,6 +48,8 @@ _P = {
  "step_fwd": '<polyline points="9 18 15 12 9 6"/>',
  "razor": '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/>',
  "film": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18M17 3v18M3 7.5h4M3 12h18M3 16.5h4M17 7.5h4M17 16.5h4"/>',
+ "mic": ('<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>'
+         '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>'),
  "music": '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
  "import": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
  "export": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
@@ -148,6 +150,7 @@ _ICONS = {
     # insert
     "text": ("fa5s.font", "text"), "title": ("fa5s.heading", "text"), "lower_third": ("fa5s.tag", "text"),
     "subtitle": ("fa5s.closed-captioning", "text"), "layer_plus": ("fa5s.plus-square", "layer_plus"),
+    "mic": ("fa5s.microphone", "mic"),
     "audio_plus": ("fa5s.music", "music"), "prune": ("fa5s.broom", "trash"), "plus": ("fa5s.plus", "plus"),
     # transport
     "play": ("fa5s.play", "play"), "pause": ("fa5s.pause", "pause"),

@@ -4,21 +4,23 @@ import os
 import shutil
 import tempfile
 
-from PyQt5.QtCore import Qt, QSize, QTimer, QSettings
+from PyQt5.QtCore import Qt, QSize, QTimer, QSettings, QStandardPaths
 from PyQt5.QtGui import QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAction, QActionGroup,
     QSplitter, QFileDialog, QMessageBox, QProgressDialog, QSizePolicy, QStackedWidget, QButtonGroup,
-    QApplication, QToolButton, QMenu, QFrame,
+    QApplication, QToolButton, QMenu, QFrame, QDialog,
 )
 
 from . import theme
 from ..core import ffmpeg_tools as ft
+from ..core import voiceover as vo_core
 from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS
 from .timeline import TimelineWidget, format_tc
 from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
 from .titles import render_project_titles
 from .panels import fit_tile, MediaBin, TextPanel, PropertiesPanel, ProjectDialog, ExportDialog
+from .voiceover import HAS_INPUT, VoiceRecorder, VoiceoverDialog
 from .docks import vsep
 from ..workers import MediaWorker, ExportWorker
 
@@ -88,6 +90,7 @@ class MainWindow(QMainWindow):
         self.a_subtitle = A("Add &Subtitle", lambda: self.add_title("Subtitle"), "Ctrl+Alt+T", "subtitle")
         self.a_layer = A("Add Video &Layer", self.add_video_layer, "Ctrl+Shift+L", "layer_plus")
         self.a_atrack = A("Add &Audio Track", self.add_audio_track, "Ctrl+Shift+A", "audio_plus")
+        self.a_record = A("Record &Voiceover…", self.record_voiceover, "Ctrl+R", "mic")
         self.a_prune = A("&Remove Empty Layers", self.remove_empty_layers, None, "prune")
         self.a_export = A("&Export Video…", self.export_video, "Ctrl+M", "export")
         self.a_settings = A("Project &Settings…", self.project_settings, "Ctrl+Alt+P", "settings")
@@ -220,8 +223,8 @@ class MainWindow(QMainWindow):
                 ("File", (self.a_new, self.a_open, self.a_save, self.a_saveas, None, self.a_import, self.a_settings,
                           None, self.a_quit)),
                 ("Edit", (self.a_undo, self.a_redo, None, self.a_split, self.a_delete, self.a_ripple, None, self.a_keyframe)),
-                ("Insert", (self.a_title, self.a_lower, self.a_subtitle, None, self.a_layer, self.a_atrack,
-                            self.a_prune))):
+                ("Insert", (self.a_title, self.a_lower, self.a_subtitle, None, self.a_record, None, self.a_layer,
+                            self.a_atrack, self.a_prune))):
             sub = menu.addMenu(title)
             for a in items:
                 sub.addSeparator() if a is None else sub.addAction(a)
@@ -365,8 +368,10 @@ class MainWindow(QMainWindow):
         for a in (self.a_split, self.a_delete, self.a_keyframe):
             row.addWidget(self._icon_button(a))
         row.addStretch(1)
-        for text, icon, slot, tip in (("Layer", "layer_plus", self.add_video_layer, "Add a video layer (Ctrl+Shift+L)"),
-                                      ("Audio", "audio_plus", self.add_audio_track, "Add an audio track (Ctrl+Shift+A)")):
+        for text, icon, slot, tip in (
+                ("Record", "mic", self.record_voiceover, "Record a voiceover from the microphone onto an audio track (Ctrl+R)"),
+                ("Layer", "layer_plus", self.add_video_layer, "Add a video layer (Ctrl+Shift+L)"),
+                ("Audio", "audio_plus", self.add_audio_track, "Add an audio track (Ctrl+Shift+A)")):
             b = QToolButton()
             b.setObjectName("tlText")
             b.setText(" " + text)
@@ -591,6 +596,48 @@ class MainWindow(QMainWindow):
 
     def add_audio_track(self):
         self._on_track_add("audio", len(self.project.tracks))
+
+    # ── voiceover ────────────────────────────────────────────────────────────
+    def _voiceover_dir(self):
+        """Next to the saved project, else in the app's data folder (the project keeps the full path)."""
+        base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation) or tempfile.gettempdir()
+        return vo_core.recordings_dir(self.path, os.path.join(base, vo_core.FOLDER_NAME))
+
+    def record_voiceover(self):
+        """Record from the microphone at the playhead; the take lands on an audio track as a new clip."""
+        if not HAS_INPUT or not VoiceRecorder.devices():
+            QMessageBox.warning(
+                self, "No microphone",
+                "Venma Video couldn't find a microphone.\n\nConnect one (and, on macOS or Windows, allow this app "
+                "to use it in the system privacy settings), then try again.")
+            return
+        p = self.project
+        self.engine.pause()
+        start = self.engine.t
+        track, created = p.voiceover_track(start)        # the audio layer the take will land on (made now if needed)
+        canvas = self.timeline.canvas
+        canvas.set_project(p)
+        canvas.ensure_track_visible(track)
+        dlg = VoiceoverDialog(self.engine, p, canvas, track, start, self._voiceover_dir(), self)
+        ok = dlg.exec_() == QDialog.Accepted
+        canvas.clear_recording()
+        if not ok:
+            if created and p.track_is_empty(track):
+                p.remove_track(track)                    # nothing was recorded: don't leave a stray empty track
+            self._refresh_all()
+            return
+        r = dlg.result_info
+        item = MediaItem(p.new_media_id(), r["path"], "audio", r["duration"], has_audio=True)
+        p.add_media(item)
+        c = p.place_clip(item.id, r["track"], r["start"], r["duration"])
+        if created and c.track != track and p.track_is_empty(track):
+            p.remove_track(track)                        # the take had to go elsewhere; drop the unused new track
+        self.commit("Record Voiceover")
+        canvas.select(c.id)
+        canvas.ensure_track_visible(c.track)
+        self.engine.seek(c.end)
+        name = p.tracks[c.track]["name"]
+        self.statusBar().showMessage(f"Voiceover added to {name}: {os.path.basename(r['path'])}", 6000)
 
     def _on_track_remove(self, index):
         if not self.project.can_remove_track(index):

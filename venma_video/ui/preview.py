@@ -524,6 +524,7 @@ class PreviewEngine(QObject):
         self.stills.start()
 
         self.aout = self.adev = None
+        self._muted = False                # master mute for the preview sound (used while recording a voiceover)
         self._afmt = None
         self._apending = b""
         self._rate, self._ch = 48000, 2
@@ -551,8 +552,19 @@ class PreviewEngine(QObject):
             self._rate, self._ch = fmt.sampleRate(), fmt.channelCount()
             self.aout = QAudioOutput(fmt, self)
             self.aout.setBufferSize(int(self._rate * self._ch * 2 * 0.2))     # ~200 ms
+            self.aout.setVolume(0.0 if self._muted else 1.0)
         except Exception:
             self.aout = None
+
+    def set_muted(self, muted):
+        """Silence (or restore) the preview sound without touching the project; picture keeps playing."""
+        self._muted = bool(muted)
+        if self.aout is not None:
+            self.aout.setVolume(0.0 if self._muted else 1.0)
+
+    def is_starting(self):
+        """True while playback has been requested but the clock is still waiting for decoders to be ready."""
+        return bool(self.playing and self._starting)
 
     def _reset_audio(self):
         self._apending = b""

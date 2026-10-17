@@ -16,6 +16,7 @@ MODULES = [
     "venma_video.ui.timeline",
     "venma_video.ui.preview",
     "venma_video.ui.panels",
+    "venma_video.ui.voiceover",
     "venma_video.ui.main_window",
     "venma_video.workers",
     "venma_video.app",
