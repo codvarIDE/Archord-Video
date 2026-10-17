@@ -147,20 +147,69 @@ def _num(x):
 
 
 def has_transform(clip):
-    """True when a picture clip has been moved or resized away from "fitted, centred"."""
+    """True when a picture clip has been moved, resized or rotated away from "fitted, centred"."""
     return (clip is not None and getattr(clip, "title", None) is None
-            and (abs(clip.scale - 1) > 1e-3 or abs(clip.pos_x - 0.5) > 1e-3 or abs(clip.pos_y - 0.5) > 1e-3))
+            and (abs(clip.scale - 1) > 1e-3 or abs(clip.pos_x - 0.5) > 1e-3 or abs(clip.pos_y - 0.5) > 1e-3
+                 or abs(getattr(clip, "rotation", 0.0)) > 1e-3))
 
 
 def _fit(W, H, clip, flags=""):
     """Filters that scale a picture to fit the frame, times the clip's scale (no padding when transformed)."""
     s = clip.scale if has_transform(clip) else 1.0
     bw, bh = max(2, int(round(W * s))), max(2, int(round(H * s)))
-    return [f"scale={bw}:{bh}:force_original_aspect_ratio=decrease{flags}", "setsar=1", "format=rgba"]
+    chain = [f"scale={bw}:{bh}:force_original_aspect_ratio=decrease{flags}", "setsar=1", "format=rgba"]
+    rot = getattr(clip, "rotation", 0.0)
+    kfs = getattr(clip, "keyframes", None)
+    if kfs and any("rotation" in kf.values for kf in kfs):
+        # Build piecewise linear interpolation expression in FFmpeg for rotation: t is in seconds (local to clip)
+        # rotate filter takes radians
+        rot_kfs = [kf for kf in kfs if "rotation" in kf.values]
+        if len(rot_kfs) == 1:
+            rad = rot_kfs[0].values["rotation"] * 3.14159265 / 180.0
+            chain.append(f"rotate='{rad}':ow='rotw({rad})':oh='roth({rad})':c=black@0")
+        elif len(rot_kfs) > 1:
+            # piecewise linear formula: if(lte(t, t1), v0 + (v1-v0)*(t-t0)/(t1-t0), ...)
+            expr = f"{rot_kfs[-1].values['rotation'] * 3.14159265 / 180.0:.5f}"
+            for j in range(len(rot_kfs) - 2, -1, -1):
+                k0, k1 = rot_kfs[j], rot_kfs[j + 1]
+                t0, t1 = k0.t, k1.t
+                v0 = k0.values["rotation"] * 3.14159265 / 180.0
+                v1 = k1.values["rotation"] * 3.14159265 / 180.0
+                dt = max(1e-4, t1 - t0)
+                seg = f"({v0:.5f}+({v1-v0:.5f})*(t-{t0:.4f})/{dt:.4f})"
+                expr = f"if(lte(t,{t1:.4f}),{seg},{expr})"
+            chain.append(f"rotate='{expr}':ow='rotw({expr})':oh='roth({expr})':c=black@0")
+    elif abs(rot) > 1e-3:
+        rad = rot * 3.14159265 / 180.0
+        chain.append(f"rotate='{rad}':ow='rotw({rad})':oh='roth({rad})':c=black@0")
+    return chain
 
 
 def _place(src, dst, W, H, clip, fps, tag, bg="black@0"):
     """Graph lines that put the scaled picture ``src`` onto a W x H canvas, centred on the clip's position."""
+    kfs = getattr(clip, "keyframes", None)
+    has_pos_kf = kfs and any("pos_x" in kf.values or "pos_y" in kf.values for kf in kfs)
+    if has_pos_kf:
+        # Build piecewise linear interpolation expressions for X and Y in FFmpeg
+        pos_kfs = [kf for kf in kfs if "pos_x" in kf.values or "pos_y" in kf.values]
+        def _axis_expr(axis, default_val, full_dim):
+            if len(pos_kfs) == 1:
+                return _num(full_dim * pos_kfs[0].values.get(axis, default_val))
+            last_v = full_dim * pos_kfs[-1].values.get(axis, default_val)
+            expr = f"{last_v:.2f}"
+            for j in range(len(pos_kfs) - 2, -1, -1):
+                k0, k1 = pos_kfs[j], pos_kfs[j + 1]
+                t0, t1 = k0.t, k1.t
+                v0 = full_dim * k0.values.get(axis, default_val)
+                v1 = full_dim * k1.values.get(axis, default_val)
+                dt = max(1e-4, t1 - t0)
+                seg = f"({v0:.2f}+({v1-v0:.2f})*(t-{t0:.4f})/{dt:.4f})"
+                expr = f"if(lte(t,{t1:.4f}),{seg},{expr})"
+            return expr
+        px_expr = _axis_expr("pos_x", clip.pos_x, W)
+        py_expr = _axis_expr("pos_y", clip.pos_y, H)
+        return [f"color=c={bg}:s={W}x{H}:r={fps},format=rgba[bg{tag}]",
+                f"[bg{tag}][{src}]overlay=x='{px_expr}-w/2':y='{py_expr}-h/2':format=auto:shortest=1[{dst}]"]
     px, py = _num(W * clip.pos_x), _num(H * clip.pos_y)
     return [f"color=c={bg}:s={W}x{H}:r={fps},format=rgba[bg{tag}]",
             f"[bg{tag}][{src}]overlay=x='{px}-w/2':y='{py}-h/2':format=auto:shortest=1[{dst}]"]
@@ -188,6 +237,11 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
     n = 0
     for c in sorted(project.clips, key=lambda c: (-c.track, c.start)):      # lower tracks first
         m = project.media[c.media_id]
+        is_video_track = project.tracks[c.track]["kind"] == "video"
+        draw = is_video_track and m.kind in ("video", "image", "text") and not project.track_hidden(c.track)
+        sound = m.has_audio and m.kind != "image" and not project.track_muted(c.track)
+        if not draw and not sound:
+            continue                                  # hidden picture layer / muted track: nothing to render
         src = m.path
         if m.kind == "text":
             src = text_images.get(c.id)
@@ -199,8 +253,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             cmd += ["-ss", _num(c.in_point), "-t", _num(c.duration), "-i", m.path]
         i = n
         n += 1
-        is_video_track = project.tracks[c.track]["kind"] == "video"
-        if is_video_track and m.kind in ("video", "image", "text"):
+        if draw:
             moved = has_transform(c)
             chain = [f"fps={fps}"] + _fit(W, H, c)
             if not moved:
@@ -217,7 +270,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
                 chain.append(f"setpts=PTS-STARTPTS+{_num(c.start)}/TB")
                 filters.append(f"[{i}:v]{','.join(chain)}[v{i}]")
             vparts.append((i, c))
-        if m.has_audio and m.kind != "image":
+        if sound:
             delay = int(round(c.start * 1000))
             filters.append(f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,volume={_num(c.volume)},"
                            f"adelay={delay}|{delay}[a{i}]")
@@ -350,3 +403,51 @@ def still_cmd(path, kind, src, w, h, clip=None):
     cmd += ["-i", path, "-an", "-sn", "-frames:v", "1"] + _preview_filter_args(w, h, 0, clip) + [
             "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
     return cmd
+
+
+# ── per-layer preview (each layer is decoded alone at its fitted size and painted by Qt in stacking order) ──
+def layer_size(media_w, media_h, pw, ph, scale=1.0):
+    """Pixel size (even numbers) a picture is decoded at for the preview: the picture fitted into a pw x ph frame,
+    doubled while the clip is enlarged past 1.0 (so zooming in stays sharp), never bigger than the source."""
+    if media_w <= 0 or media_h <= 0:
+        media_w, media_h, cap = pw, ph, False
+    else:
+        cap = True
+    f = min(pw / media_w, ph / media_h) * (2.0 if scale > 1.001 else 1.0)
+    if cap:
+        f = min(f, 1.0)
+    return max(2, int(media_w * f) // 2 * 2), max(2, int(media_h * f) // 2 * 2)
+
+
+def _layer_vf(w, h, fps, clip, alpha):
+    chain = [f"fps={fps}"] if fps else []
+    chain += [f"scale={w}:{h}:flags=fast_bilinear", "setsar=1"]
+    if clip is not None and (abs(clip.brightness) > 1e-3 or abs(clip.contrast - 1) > 1e-3
+                             or abs(clip.saturation - 1) > 1e-3):
+        chain.append(f"eq=brightness={_num(clip.brightness)}:contrast={_num(clip.contrast)}"
+                     f":saturation={_num(clip.saturation)}")
+    chain.append("format=rgba" if alpha else "format=rgb24")
+    return ",".join(chain)
+
+
+def layer_stream_cmd(path, src_start, duration, w, h, fps, clip=None):
+    """Raw RGB24 frames (w*h*3 bytes each) of ONE video layer at its own fitted size, no padding."""
+    exe = ffmpeg_path()
+    if not exe:
+        raise RuntimeError("ffmpeg not found")
+    return [exe, "-v", "error", "-nostdin", "-ss", f"{max(0.0, src_start):.3f}", "-t", f"{max(0.05, duration):.3f}",
+            "-i", path, "-an", "-sn", "-vf", _layer_vf(w, h, fps, clip, False),
+            "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+
+
+def layer_still_cmd(path, kind, src, w, h, clip=None):
+    """ONE raw frame of a video / image layer at its fitted size: RGB24 for video, RGBA for images (keeps transparency)."""
+    exe = ffmpeg_path()
+    if not exe:
+        raise RuntimeError("ffmpeg not found")
+    alpha = kind == "image"
+    cmd = [exe, "-v", "error", "-nostdin"]
+    if kind == "video":
+        cmd += ["-ss", f"{max(0.0, src):.3f}"]
+    return cmd + ["-i", path, "-an", "-sn", "-frames:v", "1", "-vf", _layer_vf(w, h, 0, clip, alpha),
+                  "-pix_fmt", "rgba" if alpha else "rgb24", "-f", "rawvideo", "-"]

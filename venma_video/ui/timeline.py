@@ -1,18 +1,27 @@
 """Multi-track timeline widget: ruler, tracks, clips, playhead, trimming, snapping, drag & drop."""
 import math
 
-from PyQt5.QtCore import Qt, QRectF, QPointF, QRect, pyqtSignal, QByteArray
+from PyQt5.QtCore import Qt, QRectF, QPointF, QRect, QEvent, pyqtSignal, QByteArray
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QPainterPath, QFont, QFontMetrics, QPolygonF, QPixmap
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QScrollBar, QMenu
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QScrollBar, QMenu, QToolTip
 
 from . import theme
 from ..core.project import MIN_CLIP, NEW_BOTTOM, NEW_TOP, STILL_KINDS
 
 MIME_MEDIA = "application/x-venma-media"
-HEADER_W = 100
+HEADER_W = 116
 RULER_H = 28
 TRACK_H = 58
 LANE_H = 28           # the empty "drop here for a new layer" strips above the first and below the last track
+BTN = 20              # layer switch buttons (hide / lock / mute) in the header column
+BTN_GAP = 4
+SWITCHES = ("hidden", "locked", "muted")
+# key -> (icon when off, icon when on, tooltip when off, tooltip when on)
+SWITCH_UI = {
+    "hidden": ("eye", "eye_off", "Hide layer", "Show layer"),
+    "locked": ("unlock", "lock", "Lock layer (no edits)", "Unlock layer"),
+    "muted": ("volume", "volume_off", "Mute layer", "Unmute layer"),
+}
 EDGE = 7              # px grab zone for trimming
 SNAP_PX = 9
 KIND_COLORS = {"video": "#2F6E8E", "image": "#8A6A2F", "audio": "#1F8A83", "text": "#6D58B8"}
@@ -54,6 +63,8 @@ class TimelineCanvas(QWidget):
     trackAddRequested = pyqtSignal(str, int)     # "video" | "audio", index to insert the new track at
     trackRemoveRequested = pyqtSignal(int)       # track index
     trackMoveRequested = pyqtSignal(int, int)    # track index, -1 (up) / +1 (down)
+    trackFlagToggled = pyqtSignal(int, str)      # track index, "hidden" | "locked" | "muted"
+    trackReordered = pyqtSignal(int, int)        # layer dragged from index, to index
     viewChanged = pyqtSignal()
     statusMessage = pyqtSignal(str)
 
@@ -72,6 +83,7 @@ class TimelineCanvas(QWidget):
         self._scrub = False
         self._pan = None
         self._drop = None           # (track, time) while dragging media over
+        self._tdrag = None          # layer being dragged by its header: dict(src, press, moved, target)
         self._icons = {}
         self._cache = None          # pre-rendered tracks/clips/ruler (playhead is drawn on top)
         self._cache_key = None
@@ -139,6 +151,54 @@ class TimelineCanvas(QWidget):
             if top <= y < top + LANE_H:
                 return lane
         return None
+
+    # ── layer switches (hide / lock / mute) and header drag ──────────────────
+    def switch_rect(self, i, key):
+        """Button rectangle of one switch in track ``i``'s header (same column for every layer)."""
+        y = self.track_y(i) + TRACK_H - BTN - 6
+        return QRectF(10 + SWITCHES.index(key) * (BTN + BTN_GAP), y, BTN, BTN)
+
+    def switches_for(self, i):
+        """Switches a layer has: audio tracks have nothing to hide."""
+        if not self.project or not (0 <= i < len(self.project.tracks)):
+            return ()
+        return SWITCHES if self.project.tracks[i]["kind"] == "video" else ("locked", "muted")
+
+    def switch_at(self, pos):
+        """(track index, switch key) under ``pos`` in the header column, or None."""
+        i = self.track_at(pos.y())
+        if i < 0 or pos.x() >= HEADER_W:
+            return None
+        pt = QPointF(pos)
+        for key in self.switches_for(i):
+            if self.switch_rect(i, key).adjusted(-2, -2, 2, 2).contains(pt):
+                return i, key
+        return None
+
+    def _group_range(self, i):
+        """(first, last) track index of the layers that share ``i``'s kind (the only places it may be dragged to)."""
+        kind = self.project.tracks[i]["kind"]
+        idx = [n for n, t in enumerate(self.project.tracks) if t["kind"] == kind]
+        return idx[0], idx[-1]
+
+    def _drag_target(self, y):
+        lo, hi = self._group_range(self._tdrag["src"])
+        row = int((y - self.track_y(0)) // TRACK_H)
+        return min(max(row, lo), hi)
+
+    def event(self, e):
+        if e.type() == QEvent.ToolTip and self.project:
+            hit = self.switch_at(e.pos())
+            if hit:
+                i, key = hit
+                off_i, on_i, off_t, on_t = SWITCH_UI[key]
+                QToolTip.showText(e.globalPos(), on_t if self.project.tracks[i].get(key) else off_t, self)
+            elif e.pos().x() < HEADER_W and self.track_at(e.pos().y()) >= 0:
+                QToolTip.showText(e.globalPos(), "Drag to reorder layers", self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(e)
 
     def _row_top(self, track):
         if track in (NEW_TOP, NEW_BOTTOM):                  # a clip being dragged into a new-layer strip
@@ -286,12 +346,23 @@ class TimelineCanvas(QWidget):
                 self.trackAddRequested.emit("video", 0)
             elif lane == NEW_BOTTOM:
                 self.trackAddRequested.emit("audio", len(self.project.tracks))
+            else:
+                sw = self.switch_at(pos)
+                if sw:
+                    self.trackFlagToggled.emit(*sw)
+                else:
+                    i = self.track_at(pos.y())
+                    if i >= 0:                                   # press on the header body: maybe a reorder drag
+                        self._tdrag = dict(src=i, press=pos, moved=False, target=i)
             return
         if self.tool == "zoom":
             self.zoom_by(0.8 if e.modifiers() & Qt.AltModifier else 1.25, pos.x())
             return
         c, zone = self.hit(pos)
         if self.tool == "razor":
+            if c and self.project.track_locked(c.track):
+                self._locked_note(c.track)
+                return
             if c:
                 t = self.snap(self.x2t(pos.x()), ignore=c.id)
                 self.splitRequested.emit(c.id, t)
@@ -305,6 +376,9 @@ class TimelineCanvas(QWidget):
             return
         if self.selected != c.id:
             self.select(c.id)
+        if self.project.track_locked(c.track):                 # selectable, but nothing can change
+            self._locked_note(c.track)
+            return
         ripple = self.tool == "ripple"
         if ripple and zone == "body":
             return                                  # ripple only acts on clip edges
@@ -318,10 +392,24 @@ class TimelineCanvas(QWidget):
                           press=pos, ripple=ripple, in0=c.in_point, t0=self.x2t(pos.x()), shift=0.0)
         self._drag["in"] = c.in_point               # live in-point while slipping
 
+    def _locked_note(self, track):
+        self.statusMessage.emit(f"{self.project.tracks[track]['name']} is locked. Click its lock to edit.")
+
     def mouseMoveEvent(self, e):
         if not self.project:
             return
         pos = e.pos()
+        td = self._tdrag
+        if td is not None:                                     # dragging a layer by its header
+            if not td["moved"] and (pos - td["press"]).manhattanLength() < 5:
+                return
+            if not td["moved"]:
+                td["moved"] = True
+                self.setCursor(Qt.ClosedHandCursor)
+            self._autoscroll(pos.y())
+            td["target"] = self._drag_target(pos.y())
+            self.invalidate()
+            return
         if self._pan is not None:
             dx = (e.globalPos().x() - self._pan[0]) / self.pps
             self.set_scroll(self._pan[1] - dx)
@@ -330,6 +418,10 @@ class TimelineCanvas(QWidget):
             self._seek_to_x(pos.x())
             return
         d = self._drag
+        if d is None and pos.x() < HEADER_W and pos.y() >= RULER_H:
+            self.setCursor(Qt.PointingHandCursor if self.switch_at(pos) else
+                           Qt.OpenHandCursor if self.track_at(pos.y()) >= 0 else Qt.ArrowCursor)
+            return
         if d is None:
             c, zone = self.hit(pos)
             if self.tool == "select":
@@ -369,7 +461,7 @@ class TimelineCanvas(QWidget):
                 track = lane                                   # over a "new layer" strip that fits this clip
             else:
                 track = self.track_at(pos.y())
-                if track < 0 or not self.project.track_accepts(track, m.kind):
+                if track < 0 or not self.project.track_accepts(track, m.kind) or self.project.track_locked(track):
                     track = d["track0"]
             d["track"] = track
             if track in (NEW_TOP, NEW_BOTTOM):
@@ -388,6 +480,13 @@ class TimelineCanvas(QWidget):
         self.invalidate()
 
     def mouseReleaseEvent(self, e):
+        td, self._tdrag = self._tdrag, None
+        if td is not None:
+            self.set_tool(self.tool)
+            if td["moved"] and td["target"] != td["src"]:
+                self.trackReordered.emit(td["src"], td["target"])
+            self.invalidate()
+            return
         if self._pan is not None:
             self._pan = None
             self.set_tool(self.tool)
@@ -449,8 +548,13 @@ class TimelineCanvas(QWidget):
         if e.mimeData().hasFormat(MIME_MEDIA):
             lane = self.lane_at(e.pos().y())
             self._autoscroll(e.pos().y())
-            self._drop = (lane if lane is not None else self.track_at(e.pos().y()),
-                          max(0.0, self.snap(self.x2t(e.pos().x()))))
+            row = lane if lane is not None else self.track_at(e.pos().y())
+            if row >= 0 and self.project.track_locked(row):    # locked layer: nothing can be dropped on it
+                self._drop = None
+                self.invalidate()
+                e.ignore()
+                return
+            self._drop = (row, max(0.0, self.snap(self.x2t(e.pos().x()))))
             self.invalidate()
             e.acceptProposedAction()
 
@@ -464,7 +568,13 @@ class TimelineCanvas(QWidget):
             mid = bytes(e.mimeData().data(MIME_MEDIA)).decode("utf-8")      # one id, or several joined by newlines
             t = max(0.0, self.snap(self.x2t(e.pos().x())))
             lane = self.lane_at(e.pos().y())
-            self.mediaDropped.emit(mid, lane if lane is not None else self.track_at(e.pos().y()), t)
+            row = lane if lane is not None else self.track_at(e.pos().y())
+            if row >= 0 and self.project.track_locked(row):
+                self._locked_note(row)
+                e.ignore()
+                self.invalidate()
+                return
+            self.mediaDropped.emit(mid, row, t)
             e.acceptProposedAction()
         self.invalidate()
 
@@ -477,6 +587,11 @@ class TimelineCanvas(QWidget):
         if i >= 0:
             kind = tracks[i]["kind"]
             noun = "layer" if kind == "video" else "audio track"
+            for key in self.switches_for(i):
+                off_i, on_i, off_t, on_t = SWITCH_UI[key]
+                menu.addAction(on_t if tracks[i].get(key) else off_t,
+                               lambda key=key: self.trackFlagToggled.emit(i, key))
+            menu.addSeparator()
             menu.addAction(f"Add {noun} above", lambda: self.trackAddRequested.emit(kind, i))
             menu.addAction(f"Add {noun} below", lambda: self.trackAddRequested.emit(kind, i + 1))
             menu.addSeparator()
@@ -591,14 +706,44 @@ class TimelineCanvas(QWidget):
             p.fillRect(QRectF(0, y + 6, 3, TRACK_H - 12), QColor(KIND_COLORS.get(ttype, "#888")))   # type colour stripe
             key = ({"video": "film", "image": "image", "text": "text", "audio": "music"}[ttype], T["muted"])
             icon = self._icons.get(key) or self._icons.setdefault(key, theme.pixmap(key[0], key[1], 16))
-            p.drawPixmap(12, int(y + TRACK_H // 2 - 8), icon)
+            p.drawPixmap(12, int(y + 8), icon)
             p.setPen(QColor(T["text"]))
             f = p.font(); f.setBold(True); p.setFont(f)
-            p.drawText(QRectF(36, y, HEADER_W - 40, TRACK_H), Qt.AlignVCenter | Qt.AlignLeft, tr["name"])
+            p.drawText(QRectF(36, y + 6, HEADER_W - 40, 20), Qt.AlignVCenter | Qt.AlignLeft,
+                       QFontMetrics(f).elidedText(tr["name"], Qt.ElideRight, HEADER_W - 42))
             f.setBold(False); p.setFont(f)
+            self._draw_switches(p, i, tr)
+            if self._tdrag and self._tdrag["moved"] and self._tdrag["src"] == i:      # the layer being dragged
+                veil = QColor(T["accent"]); veil.setAlpha(45)
+                p.fillRect(QRectF(0, y, w, TRACK_H), veil)
+        if self._tdrag and self._tdrag["moved"]:                                       # drop position line
+            src, tgt = self._tdrag["src"], self._tdrag["target"]
+            if tgt != src:
+                ly = self.track_y(tgt) + (TRACK_H if tgt > src else 0)
+                p.setPen(QPen(QColor(T["accent"]), 3))
+                p.drawLine(QPointF(0, ly), QPointF(w, ly))
         p.restore()
 
         self._draw_ruler(p)
+
+    def _draw_switches(self, p, i, tr):
+        """The hide / lock / mute buttons in a layer's header."""
+        T = theme.T
+        for key in self.switches_for(i):
+            on = bool(tr.get(key))
+            off_icon, on_icon, _, _ = SWITCH_UI[key]
+            r = self.switch_rect(i, key)
+            dead = key == "muted" and not on and not self.project.track_has_sound(i)   # nothing to mute here
+            if on:
+                bg = QColor(T["accent"]); bg.setAlpha(70)
+                p.setPen(Qt.NoPen)
+                p.setBrush(bg)
+                p.drawRoundedRect(r, 5, 5)
+            col = T["accent"] if on else (T["faint"] if dead else T["muted"])
+            name = on_icon if on else off_icon
+            ik = (name, col, BTN)
+            pm = self._icons.get(ik) or self._icons.setdefault(ik, theme.pixmap(name, col, 14))
+            p.drawPixmap(int(r.x() + (BTN - 14) / 2), int(r.y() + (BTN - 14) / 2), pm)
 
     def _paint_playhead(self, p):
         T = theme.T
@@ -715,12 +860,44 @@ class TimelineCanvas(QWidget):
         p.setPen(QColor("white"))
         p.drawText(QRectF(r.left() + 6, r.top(), max(0, r.width() - 10), 14), Qt.AlignVCenter | Qt.AlignLeft,
                    fm.elidedText(label, Qt.ElideRight, int(max(0, r.width() - 12))))
+        if self.project.track_hidden(c.track):            # hidden layer: the clip fades into the row
+            veil = QColor(T["surface"]); veil.setAlpha(165)
+            p.fillRect(r, veil)
+        if self.project.track_locked(c.track):            # locked layer: diagonal hatching
+            p.setPen(QPen(QColor(255, 255, 255, 38), 1.5))
+            hh = r.height()
+            x = max(r.left(), HEADER_W) - hh
+            stop = min(r.right(), self.width())
+            while x < stop:
+                p.drawLine(QPointF(x, r.bottom()), QPointF(x + hh, r.top()))
+                x += 9
         p.restore()
 
         sel = c.id == self.selected
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(QColor("white") if sel else QColor(0, 0, 0, 60), 2 if sel else 1))
         p.drawPath(path)
+
+        # keyframe diamonds — drawn on top of the clip body (clipped to the clip rect)
+        if c.keyframes:
+            p.save()
+            p.setClipPath(path)
+            kf_y = r.center().y() + 6
+            for kf in c.keyframes:
+                kx = self.t2x(c.start + kf.t)
+                if r.left() - 6 <= kx <= r.right() + 6:
+                    diamond = QPolygonF([
+                        QPointF(kx,     kf_y - 6),
+                        QPointF(kx + 6, kf_y),
+                        QPointF(kx,     kf_y + 6),
+                        QPointF(kx - 6, kf_y),
+                    ])
+                    # Dark drop-shadow/border for high visibility against any video clip color
+                    p.setPen(QPen(QColor(0, 0, 0, 220), 1.5))
+                    p.setBrush(QColor("#FFCC00"))
+                    p.drawPolygon(diamond)
+            p.restore()
+
         if d and d["zone"] == "slip":     # live in-point read-out while slipping
             label = f"Slip  in {in_point:.2f}s  ({in_point - d['in0']:+.2f}s)"
             fm = QFontMetrics(p.font())

@@ -1,4 +1,4 @@
-"""Venma Video design system (shared look with Venma): warm paper tones, magenta accent, serif headings, line icons.
+"""Venma Video design system (shared look with Venma): warm paper tones, violet accent, serif headings, line icons.
 
 One place for every colour token, the global Qt stylesheet, and the icon set.
 """
@@ -11,13 +11,13 @@ from PyQt5.QtSvg import QSvgRenderer
 LIGHT = dict(
     bg="#F3F4F6", surface="#FFFFFF", panel="#FFFFFF", sunken="#E9EBEF",
     border="#E1E4E9", border_strong="#CBD0D8", text="#16181D", muted="#6B7280",
-    faint="#A3A9B4", accent="#D1169E", accent_hover="#A80F7D", accent_soft="#FADCF0",
+    faint="#A3A9B4", accent="#7C3AED", accent_hover="#6D28D9", accent_soft="#EDE4FD",
     on_accent="#FFFFFF", canvas="#E4E6EB", checker1="#DDE0E6", checker2="#EEF0F3",
 )
 DARK = dict(
     bg="#0E0E10", surface="#1C1C20", panel="#161619", sunken="#111113",
     border="#26262B", border_strong="#34343A", text="#F4F4F5", muted="#9A9AA3",
-    faint="#62626B", accent="#E83DBE", accent_hover="#F26CD2", accent_soft="#3A1532",
+    faint="#62626B", accent="#8B5CF6", accent_hover="#A78BFA", accent_soft="#2A1A4F",
     on_accent="#FFFFFF", canvas="#08080A", checker1="#1B1B1F", checker2="#232327",
 )
 T = dict(DARK)           # live tokens (mutated by set_theme)
@@ -64,6 +64,8 @@ _P = {
  "eye": '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
  "eye_off": '<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/>',
  "lock": '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+ "unlock": '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+ "volume_off": '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/>',
  "arrow_up": '<polyline points="18 15 12 9 6 15"/>',
  "arrow_down": '<polyline points="6 9 12 15 18 9"/>',
  "swap": '<path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/>',
@@ -71,6 +73,7 @@ _P = {
  "history": '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
  "ripple": '<path d="M8 4v16"/><path d="M8 12h6"/><polyline points="11.5 9.5 14 12 11.5 14.5"/><rect x="17" y="7" width="4" height="10" rx="1"/>',
  "slip": '<rect x="3" y="6" width="18" height="12" rx="2"/><line x1="7" y1="12" x2="17" y2="12"/><polyline points="10 9.5 7.5 12 10 14.5"/><polyline points="14 9.5 16.5 12 14 14.5"/>',
+ "keyframe": '<polygon points="12 3 21 12 12 21 3 12 12 3"/>',
 }
 
 
@@ -100,7 +103,7 @@ def get_app_icon_path():
 
 
 def app_icon():
-    """Window/taskbar icon: uses assets/venma.ico if present, otherwise generated magenta rounded tile."""
+    """Window/taskbar icon: uses assets/venma.ico if present, otherwise generated violet rounded tile."""
     ico_path = get_app_icon_path()
     if ico_path:
         return QIcon(ico_path)
@@ -160,7 +163,7 @@ _ICONS = {
     # media / layers
     "film": ("fa5s.film", "film"), "music": ("fa5s.music", "music"), "image": ("fa5s.image", "image"),
     "layers": ("fa5s.layer-group", "layers"), "eye": ("fa5s.eye", "eye"), "eye_off": ("fa5s.eye-slash", "eye_off"),
-    "lock": ("fa5s.lock", "lock"), "volume": ("fa5s.volume-up", "volume"), "arrow_up": ("fa5s.arrow-up", "arrow_up"),
+    "lock": ("fa5s.lock", "lock"), "unlock": ("fa5s.lock-open", "unlock"), "volume_off": ("fa5s.volume-mute", "volume_off"), "volume": ("fa5s.volume-up", "volume"), "arrow_up": ("fa5s.arrow-up", "arrow_up"),
     "arrow_down": ("fa5s.arrow-down", "arrow_down"),
     # panels & UI chrome
     "panel_media": ("fa5s.photo-video", "film"), "panel_props": ("fa5s.sliders-h", "sliders"),
@@ -174,6 +177,7 @@ _ICONS = {
     "align_left": ("fa5s.align-left", None), "align_center": ("fa5s.align-center", None),
     "align_right": ("fa5s.align-right", None), "keyboard": ("fa5s.keyboard", None), "info": ("fa5s.info-circle", None),
     "spark": ("fa5s.video", "spark"),
+    "keyframe": ("fa5s.gem", "keyframe"),
 }
 
 
@@ -343,7 +347,7 @@ QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1
 QCheckBox::indicator:checked {{ background: {t['accent']}; border-color: {t['accent']}; }}
 QDialogButtonBox {{ padding-top: 6px; }}
 
-/* sliders: thin magenta track, round handle */
+/* sliders: thin violet track, round handle */
 QSlider::groove:horizontal {{ height: 4px; background: {t['border_strong']}; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {t['text']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}

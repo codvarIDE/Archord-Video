@@ -93,6 +93,44 @@ class TitleExportTests(unittest.TestCase):
         self.assertNotIn("[aout]", " ".join(cmd))
 
 
+class LayerPreviewTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(ft, "ffmpeg_path", return_value="ffmpeg")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_layer_size_fits_the_frame_and_is_even(self):
+        self.assertEqual(ft.layer_size(1920, 1080, 960, 540), (960, 540))
+        self.assertEqual(ft.layer_size(800, 600, 960, 540), (720, 540))
+        w, h = ft.layer_size(1001, 333, 960, 540)
+        self.assertEqual((w % 2, h % 2), (0, 0))
+
+    def test_layer_size_doubles_when_enlarged_but_never_exceeds_the_source(self):
+        self.assertEqual(ft.layer_size(3840, 2160, 960, 540, scale=2.0), (1920, 1080))
+        self.assertEqual(ft.layer_size(800, 600, 960, 540, scale=3.0), (800, 600))     # source is only 800x600
+
+    def test_layer_commands_have_no_padding_and_the_right_pixel_format(self):
+        v = " ".join(ft.layer_stream_cmd("a.mp4", 1.0, 2.0, 960, 540, 30))
+        self.assertIn("scale=960:540", v)
+        self.assertNotIn("pad=", v)
+        self.assertIn("format=rgb24", v)
+        img = " ".join(ft.layer_still_cmd("b.png", "image", 0.0, 720, 540))
+        self.assertIn("format=rgba", img)                       # photos keep their transparency
+
+    def test_export_stacks_layers_and_titles_in_layer_order(self):
+        p = Project(1280, 720, 30, typed=True)
+        p.add_media(MediaItem("m1", "/tmp/a.mp4", "video", 10.0, 1920, 1080, 30, False))
+        p.add_media(MediaItem("m2", "/tmp/b.png", "image", 5.0, 800, 600))
+        v = p.place_clip("m1", None, 0.0)
+        t = p.add_title(0.0, duration=3.0)                       # added last -> in front
+        img = p.place_clip("m2", None, 0.0)                      # added after the title -> in front of it
+        cmd = ft.build_export_command(p, "out.mp4", text_images={t.id: "/tmp/title.png"})
+        inputs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-i"]
+        self.assertEqual(inputs, ["/tmp/a.mp4", "/tmp/title.png", "/tmp/b.png"])
+        self.assertLess(img.track, t.track)
+        self.assertLess(t.track, v.track)
+
+
 class FindBinaryTests(unittest.TestCase):
     def test_env_var_wins(self):
         with mock.patch.dict("os.environ", {"VENMA_FFMPEG": __file__}):

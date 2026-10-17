@@ -314,6 +314,46 @@ class TitleTests(unittest.TestCase):
         self.assertEqual(Project.from_dict(d).to_dict(), d)
 
 
+class LayerControlTests(unittest.TestCase):
+    def _three_layers(self):
+        p = Project(typed=True)
+        for i in (1, 2, 3):
+            p.add_media(MediaItem(f"m{i}", f"/tmp/{i}.mp4", "video", 10.0, 1920, 1080, 30, True))
+        for i in (1, 2, 3):
+            p.place_clip(f"m{i}", start=0.0)             # c1 bottom ... c3 top
+        return p
+
+    def test_reorder_track_moves_clips_with_their_layer(self):
+        p = self._three_layers()
+        self.assertEqual([(c.id, c.track) for c in p.clips], [("c1", 2), ("c2", 1), ("c3", 0)])
+        self.assertTrue(p.reorder_track(0, 2))           # top layer dragged to the bottom
+        self.assertEqual([(c.id, c.track) for c in p.clips], [("c1", 1), ("c2", 0), ("c3", 2)])
+        self.assertFalse(p.reorder_track(0, len(p.tracks) - 1))      # can't mix with the audio track
+
+    def test_hidden_layer_is_not_visible_and_muted_flag_round_trips(self):
+        p = self._three_layers()
+        p.set_track_flag(0, "hidden", True)
+        p.set_track_flag(1, "muted", True)
+        self.assertEqual([c.id for c in p.visual_clips_at(1.0)], ["c1", "c2"])      # bottom layer first
+        q = Project.from_snapshot(p.snapshot())
+        self.assertTrue(q.track_hidden(0))
+        self.assertTrue(q.track_muted(1))
+        self.assertFalse(q.track_locked(2))
+
+    def test_locked_layer_refuses_edits(self):
+        p = self._three_layers()
+        p.set_track_flag(1, "locked", True)
+        c = p.clip("c2")
+        p.move("c2", 0, 5.0)
+        p.trim_right("c2", 3.0)
+        p.delete(["c2"])
+        self.assertIsNone(p.split("c2", 2.0))
+        self.assertEqual((c.track, c.start, c.duration), (1, 0.0, 10.0))
+        self.assertIn(c, p.clips)
+        p.set_track_flag(1, "locked", False)
+        self.assertIsNotNone(p.split("c2", 2.0))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -403,7 +443,7 @@ class LayerTests(unittest.TestCase):
 
 
 class TypedLayerTests(unittest.TestCase):
-    """CapCut-style layers: each kind of media gets its own layer, created automatically."""
+    """CapCut-style layers: picture layers stack in the order they were added (last added = in front)."""
 
     def setUp(self):
         self.p = make_project()
@@ -411,68 +451,86 @@ class TypedLayerTests(unittest.TestCase):
         self.p.tracks = [dict(t) for t in TYPED_TRACKS]
 
     def kinds(self):
-        return [t["type"] for t in self.p.tracks]
+        return [t["kind"] for t in self.p.tracks]
+
+    def names(self):
+        return [t["name"] for t in self.p.tracks]
 
     def test_new_project_starts_with_video_and_audio_only(self):
         q = Project(typed=True)
         self.assertEqual([t["name"] for t in q.tracks], ["Video", "Audio"])
 
-    def test_each_kind_lands_on_its_own_layer(self):
-        v = self.p.place_clip("m1", None, 0.0)
-        img = self.p.place_clip("m2", None, 0.0)
-        a = self.p.place_clip("m3", None, 0.0)
-        t = self.p.add_title(0.0)
-        self.assertEqual(self.p.track_type(v.track), "video")
-        self.assertEqual(self.p.track_type(img.track), "image")
-        self.assertEqual(self.p.track_type(a.track), "audio")
-        self.assertEqual(self.p.track_type(t.track), "text")
+    def test_last_added_layer_is_on_top_and_numbered_last(self):
+        v = self.p.place_clip("m1", None, 0.0)                # first picture: the base layer
+        img = self.p.place_clip("m2", None, 0.0)              # overlaps -> new layer ABOVE it
+        t = self.p.add_title(0.0)                             # overlaps both -> another layer above
+        self.assertLess(t.track, img.track)
+        self.assertLess(img.track, v.track)
+        self.assertEqual(self.names(), ["Layer 3", "Layer 2", "Layer 1", "Audio"])
+        self.assertEqual([c.id for c in self.p.visual_clips_at(1.0)], [v.id, img.id, t.id])   # paint order
 
-    def test_stacking_order_is_text_photo_video_audio(self):
+    def test_audio_stays_below_every_picture_layer(self):
         self.p.place_clip("m3", None, 0.0)
+        for _ in range(3):
+            self.p.place_clip("m1", None, 0.0)
+        self.assertEqual(self.kinds(), ["video", "video", "video", "audio"])
+
+    def test_photo_video_and_text_can_share_a_layer_when_not_overlapping(self):
+        v = self.p.place_clip("m1", None, 0.0)                # 0..10
+        img = self.p.place_clip("m2", None, 12.0)             # free on the base layer
+        self.assertEqual(img.track, v.track)
+        self.assertEqual(self.kinds().count("video"), 1)
+
+    def test_clip_is_never_hidden_behind_an_earlier_overlapping_layer(self):
+        self.p.place_clip("m1", None, 0.0)                    # base layer 0..10
+        top = self.p.place_clip("m1", None, 5.0)              # overlay layer 5..15
+        late = self.p.place_clip("m2", None, 12.0)            # base layer is free at 12, but `top` covers it
+        self.assertLessEqual(late.track, top.track)           # so it must be on or above `top`
+        self.assertNotEqual(late.track, top.track)            # `top` is busy at 12..17 -> new layer above it
+
+    def test_title_joins_the_top_layer_only_when_free(self):
+        v = self.p.place_clip("m1", None, 0.0)                # 0..10 on the only layer
+        t1 = self.p.add_title(0.0)                            # busy -> new layer on top
+        t2 = self.p.add_title(2.0)                            # top layer busy at 2 -> new layer above that
+        t3 = self.p.add_title(20.0)                           # nothing there -> joins the top layer
+        self.assertLess(t1.track, v.track)
+        self.assertLess(t2.track, t1.track)
+        self.assertEqual(t3.track, t2.track)
+
+    def test_dropping_on_a_busy_layer_inserts_a_new_one_just_above(self):
+        v = self.p.place_clip("m1", None, 0.0)
+        img = self.p.place_clip("m2", v.track, 2.0)           # dropped on the busy video layer
+        self.assertEqual(img.track, 0)
+        self.assertEqual(self.p.clip(v.id).track, 1)
+
+    def test_new_layer_lane_creates_a_layer_on_top(self):
         self.p.place_clip("m1", None, 0.0)
-        self.p.place_clip("m2", None, 0.0)
-        self.p.add_title(0.0)
-        self.assertEqual(self.kinds(), ["text", "image", "video", "audio"])
-        self.assertEqual([t["name"] for t in self.p.tracks], ["Text", "Photo", "Video", "Audio"])
+        c = self.p.place_clip("m2", NEW_TOP, 20.0)            # even though the base layer is free
+        self.assertEqual(c.track, 0)
+        aud = self.p.place_clip("m3", NEW_TOP, 0.0)           # audio ignores the top lane, goes to its own track
+        self.assertEqual(self.p.tracks[aud.track]["kind"], "audio")
 
-    def test_dropping_on_the_wrong_layer_reroutes_by_type(self):
+    def test_pictures_can_move_between_picture_layers_but_not_to_audio(self):
         v = self.p.place_clip("m1", None, 0.0)
-        img = self.p.place_clip("m2", v.track, 0.0)          # photo dropped onto the video layer
-        self.assertNotEqual(img.track, v.track)
-        self.assertEqual(self.p.track_type(img.track), "image")
-
-    def test_busy_layer_gets_a_second_layer_of_the_same_type(self):
-        a = self.p.place_clip("m1", None, 0.0)
-        b = self.p.place_clip("m1", None, 2.0)               # overlaps the first video
-        self.assertNotEqual(a.track, b.track)
-        self.assertEqual(self.kinds().count("video"), 2)
-        self.assertEqual(self.p.track_type(b.track), "video")
-        self.assertTrue(all(t["type"] != "audio" for t in self.p.tracks[:-1]))
-
-    def test_new_layer_lane_creates_a_layer_of_the_clip_type(self):
-        c = self.p.place_clip("m2", NEW_TOP, 0.0)
-        self.assertEqual(self.p.track_type(c.track), "image")
-        aud = self.p.place_clip("m3", NEW_TOP, 0.0)             # audio ignores the top lane, goes to its own track
-        self.assertEqual(self.p.track_type(aud.track), "audio")
-
-    def test_clips_cannot_be_moved_to_a_layer_of_another_type(self):
-        v = self.p.place_clip("m1", None, 0.0)
+        img = self.p.place_clip("m2", None, 0.0)              # on a layer above
+        self.p.move(img.id, v.track, 11.0)                    # photo onto the video layer (free at 11)
+        self.assertEqual(img.track, v.track)
         a = self.p.place_clip("m3", None, 0.0)
         self.p.move(v.id, a.track, 1.0)
-        self.assertEqual(self.p.track_type(v.track), "video")
+        self.assertEqual(self.p.tracks[v.track]["kind"], "video")
 
-    def test_layers_only_swap_within_their_type(self):
+    def test_picture_layers_can_be_reordered_but_not_below_audio(self):
         self.p.place_clip("m1", None, 0.0)
-        self.p.place_clip("m2", None, 0.0)                   # photo above video
-        photo = self.kinds().index("image")
-        self.assertFalse(self.p.move_track(photo, 1))        # can't go beneath the video layer
-        self.assertEqual(self.kinds(), ["image", "video", "audio"])
+        self.p.place_clip("m2", None, 0.0)
+        self.assertTrue(self.p.move_track(0, 1))              # swap the two picture layers
+        self.assertFalse(self.p.move_track(1, 1))             # can't go beneath the audio track
+        self.assertEqual(self.kinds(), ["video", "video", "audio"])
 
     def test_typed_flag_round_trips_and_old_files_stay_legacy(self):
         self.p.place_clip("m2", None, 0.0)
         q = Project.from_snapshot(self.p.snapshot())
         self.assertTrue(q.typed)
-        self.assertEqual([t["type"] for t in q.tracks], self.kinds())
+        self.assertEqual([t["kind"] for t in q.tracks], self.kinds())
         d = Project().to_dict()
         d.pop("typed")
         self.assertFalse(Project.from_dict(d).typed)

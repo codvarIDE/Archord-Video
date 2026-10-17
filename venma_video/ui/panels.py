@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 
 from . import theme
 from ..core import ffmpeg_tools as ft
-from ..core.project import PRESETS
+from ..core.project import PRESETS, KEYFRAMED_PROPS
 from .timeline import MIME_MEDIA, format_tc
 from .docks import CollapsibleSection
 
@@ -212,23 +212,61 @@ class MediaBin(QWidget):
 # ── Clip properties ──────────────────────────────────────────────────────────
 class _SliderRow(QWidget):
     changed = pyqtSignal(float)
+    keyframeToggled = pyqtSignal()
 
-    def __init__(self, label, lo, hi, default, unit="%", parent=None):
+    def __init__(self, label, lo, hi, default, unit="%", has_kf=False, parent=None):
         super().__init__(parent)
         self.default, self.unit = default, unit
+        self.has_kf = has_kf
+        self._kf_active = False
         lay = QGridLayout(self)
         lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+        
+        # Name label
         self.name = QLabel(label)
+        lay.addWidget(self.name, 0, 0)
+        
+        # Right header layout (Value + Keyframe icon button)
+        right_box = QHBoxLayout()
+        right_box.setContentsMargins(0, 0, 0, 0)
+        right_box.setSpacing(6)
+        right_box.addStretch(1)
+        
         self.val = QLabel()
-        self.val.setAlignment(Qt.AlignRight)
+        self.val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.val.setStyleSheet(f"color: {theme.T['muted']};")
+        right_box.addWidget(self.val)
+        
+        if has_kf:
+            self.kf_btn = QToolButton()
+            self.kf_btn.setFixedSize(18, 18)
+            self.kf_btn.setCursor(Qt.PointingHandCursor)
+            self.kf_btn.setToolTip("Add / Remove Keyframe at Playhead")
+            self.kf_btn.setStyleSheet("QToolButton { border: none; background: transparent; padding: 0px; }")
+            self._update_kf_icon(False)
+            self.kf_btn.clicked.connect(self.keyframeToggled.emit)
+            right_box.addWidget(self.kf_btn)
+        else:
+            self.kf_btn = None
+            
+        lay.addLayout(right_box, 0, 1)
+
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(lo, hi)
-        lay.addWidget(self.name, 0, 0)
-        lay.addWidget(self.val, 0, 1)
         lay.addWidget(self.slider, 1, 0, 1, 2)
         self.slider.valueChanged.connect(self._moved)
         self.slider.mouseDoubleClickEvent = lambda e: self.slider.setValue(self.default)
+
+    def _update_kf_icon(self, active):
+        self._kf_active = active
+        if self.kf_btn:
+            color = theme.T["accent"] if active else theme.T["faint"]
+            theme.set_icon(self.kf_btn, "keyframe", 13, "accent" if active else "faint")
+
+    def set_keyframe_active(self, active):
+        if self.kf_btn:
+            self._update_kf_icon(bool(active))
 
     def _moved(self, v):
         self.val.setText(f"{v}{self.unit}")
@@ -272,19 +310,23 @@ class PropertiesPanel(QWidget):
     propertyEdited = pyqtSignal(str, float)    # clip attribute, value
     titleEdited = pyqtSignal(str, object)      # title style key, value (title clips only)
     resetRequested = pyqtSignal()
+    keyframeAdded = pyqtSignal(float)          # clip-local time: record current props as a keyframe here
+    keyframeRemoved = pyqtSignal(float)        # clip-local time: remove keyframe near this time
+    keyframesCleared = pyqtSignal()            # clear all keyframes from the selected clip
 
     # attribute -> (label, lo, hi, default, scale between slider value and attribute)
     SPEC = [
-        ("volume", "Volume", 0, 200, 100, 100.0),
-        ("opacity", "Opacity", 0, 100, 100, 100.0),
-        ("brightness", "Brightness", -100, 100, 0, 100.0),
-        ("contrast", "Contrast", 0, 200, 100, 100.0),
-        ("saturation", "Saturation", 0, 300, 100, 100.0),
-        ("scale", "Scale", 5, 400, 100, 100.0),
-        ("pos_x", "Position X", -50, 150, 50, 100.0),
-        ("pos_y", "Position Y", -50, 150, 50, 100.0),
+        ("volume",     "Volume",     0,    200, 100, 100.0),
+        ("opacity",    "Opacity",    0,    100, 100, 100.0),
+        ("brightness", "Brightness", -100, 100,   0, 100.0),
+        ("contrast",   "Contrast",   0,    200, 100, 100.0),
+        ("saturation", "Saturation", 0,    300, 100, 100.0),
+        ("scale",      "Scale",      5,    400, 100, 100.0),
+        ("pos_x",      "Position X", -50,  150,  50, 100.0),
+        ("pos_y",      "Position Y", -50,  150,  50, 100.0),
+        ("rotation",   "Rotation",  -180,  180,   0,   1.0),
     ]
-    XFORM = ("scale", "pos_x", "pos_y")
+    XFORM = ("scale", "pos_x", "pos_y", "rotation")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -300,6 +342,7 @@ class PropertiesPanel(QWidget):
         lay.setContentsMargins(14, 10, 14, 12)
         lay.setSpacing(8)
         self._loading = False
+        self._t_clip = 0.0          # current clip-local time (set by main window)
         self.title = QLabel("No clip selected")
         self.title.setStyleSheet("font-size: 11pt; font-weight: 600;")
         self.title.setWordWrap(True)
@@ -314,8 +357,11 @@ class PropertiesPanel(QWidget):
         self.sec_visual = CollapsibleSection("Opacity & colour")
         self.sec_xform = CollapsibleSection("Position & size")
         for attr, label, lo, hi, default, scale in self.SPEC:
-            r = _SliderRow(label, lo, hi, default)
+            has_kf = attr in self.XFORM or attr == "opacity"
+            r = _SliderRow(label, lo, hi, default, has_kf=has_kf)
             r.changed.connect(lambda v, a=attr, s=scale: self.propertyEdited.emit(a, v / s))
+            if has_kf:
+                r.keyframeToggled.connect(lambda a=attr: self._toggle_property_kf(a))
             self.rows[attr] = (r, scale)
             (self.sec_audio if attr == "volume" else self.sec_xform if attr in self.XFORM else self.sec_visual).add(r)
         lay.addWidget(self.sec_audio)
@@ -325,12 +371,61 @@ class PropertiesPanel(QWidget):
         theme.set_icon(self.b_reset, "reset", 13)
         self.b_reset.clicked.connect(self.resetRequested.emit)
         lay.addWidget(self.b_reset)
+
+        # ── Keyframes section ──────────────────────────────────────────────
+        self.sec_kf = CollapsibleSection("Keyframes")
+        kflay = self.sec_kf.body_lay
+
+        kf_btn_row = QHBoxLayout()
+        self.b_kf_add = QPushButton(" Add Keyframe")
+        theme.set_icon(self.b_kf_add, "keyframe", 13)
+        self.b_kf_add.setToolTip("Record the current position, scale, rotation and opacity as a keyframe at the playhead")
+        self.b_kf_add.clicked.connect(lambda: self.keyframeAdded.emit(self._t_clip))
+        self.b_kf_remove = QPushButton("Remove")
+        self.b_kf_remove.setToolTip("Remove the keyframe nearest to the playhead")
+        self.b_kf_remove.clicked.connect(lambda: self.keyframeRemoved.emit(self._t_clip))
+        self.b_kf_clear = QPushButton("Clear All")
+        self.b_kf_clear.setToolTip("Remove all keyframes from this clip")
+        self.b_kf_clear.clicked.connect(self.keyframesCleared.emit)
+        for b in (self.b_kf_add, self.b_kf_remove, self.b_kf_clear):
+            kf_btn_row.addWidget(b)
+        kflay.addLayout(kf_btn_row)
+
+        self.kf_list = QListWidget()
+        self.kf_list.setFixedHeight(90)
+        self.kf_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.kf_list.setFocusPolicy(Qt.NoFocus)
+        kflay.addWidget(self.kf_list)
+        lay.addWidget(self.sec_kf)
+
         lay.addStretch(1)
+        self._current_clip = None
         self.set_clip(None, None, 30)
 
+    def _toggle_property_kf(self, attr):
+        """When clicking the keyframe icon next to a slider, toggle keyframing."""
+        self.keyframeAdded.emit(self._t_clip)
+
     def retint(self):
-        for sec in (self.text_box, self.sec_audio, self.sec_xform, self.sec_visual):
+        for sec in (self.text_box, self.sec_audio, self.sec_xform, self.sec_visual, self.sec_kf):
             sec.retint()
+        theme.set_icon(self.b_reset, "reset", 13)
+        theme.set_icon(self.b_kf_add, "keyframe", 13)
+        self._sync_kf_slider_icons()
+
+    def _sync_kf_slider_icons(self):
+        """Highlights keyframe icons on sliders if a keyframe exists at the current clip time."""
+        c = self._current_clip
+        if not c or not getattr(c, "keyframes", None):
+            for attr in self.rows:
+                r, _ = self.rows[attr]
+                r.set_keyframe_active(False)
+            return
+        kf = c.keyframe_at(self._t_clip, tol=0.08)
+        for attr in self.rows:
+            r, _ = self.rows[attr]
+            if r.has_kf:
+                r.set_keyframe_active(bool(kf and attr in kf.values))
 
     # ── title (text) controls ────────────────────────────────────────────────
     def _emit_title(self, key, value):
@@ -423,11 +518,15 @@ class PropertiesPanel(QWidget):
 
     # ── selection ────────────────────────────────────────────────────────────
     def set_clip(self, clip, media, fps):
+        self._current_clip = clip
         on = clip is not None
         is_title = on and clip.title is not None
         self.text_box.setVisible(is_title)
         self.sec_audio.setVisible(not is_title)
         self.sec_xform.setVisible(on and not is_title and media is not None and media.kind in ("video", "image"))
+        # Keyframe section: only for visual, non-title clips
+        kf_on = on and not is_title and media is not None and media.kind in ("video", "image")
+        self.sec_kf.setVisible(kf_on)
         for attr, (r, scale) in self.rows.items():
             r.setEnabled(on)
             r.setVisible(not is_title or attr == "opacity")     # titles only have opacity (their X / Y are in Text)
@@ -437,11 +536,14 @@ class PropertiesPanel(QWidget):
         if not on:
             self.title.setText("No clip selected")
             self.info.setText("Click a clip in the timeline to edit its properties.")
+            self.kf_list.clear()
+            self._sync_kf_slider_icons()
             return
         if is_title:
             self._load_title(clip.title)
             self.title.setText("Title")
             self.info.setText(f"Start  {format_tc(clip.start, fps)}\nLength  {format_tc(clip.duration, fps)}")
+            self._sync_kf_slider_icons()
             return
         self.title.setText(media.name)
         self.info.setText(f"Start  {format_tc(clip.start, fps)}\nLength  {format_tc(clip.duration, fps)}\n"
@@ -450,6 +552,34 @@ class PropertiesPanel(QWidget):
         for attr in ("opacity", "brightness", "contrast", "saturation") + self.XFORM:
             self.rows[attr][0].setEnabled(has_video)
         self.rows["volume"][0].setEnabled(media.kind == "audio" or media.has_audio)
+        if kf_on:
+            self.set_keyframes(clip.keyframes)
+        self._sync_kf_slider_icons()
+
+    def set_keyframes(self, keyframes):
+        """Refresh the keyframe list widget."""
+        self.kf_list.clear()
+        if not keyframes:
+            self.kf_list.addItem("(no keyframes)")
+            self._sync_kf_slider_icons()
+            return
+        for kf in keyframes:
+            parts = ", ".join(f"{k}: {v:.3f}" for k, v in sorted(kf.values.items()))
+            self.kf_list.addItem(f"{kf.t:.2f}s — {parts}")
+        self._sync_kf_slider_icons()
+
+    def set_playhead_clip_time(self, t_clip):
+        """Called by the main window to update which clip-local time the panel refers to."""
+        self._t_clip = max(0.0, t_clip)
+        self._sync_kf_slider_icons()
+        # CapCut style: update the slider positions to reflect animated interpolated values as playhead moves
+        c = self._current_clip
+        if c and getattr(c, "keyframes", None) and not self._loading:
+            props = c.props_at(self._t_clip)
+            for attr in KEYFRAMED_PROPS:
+                if attr in self.rows and attr in props:
+                    r, scale = self.rows[attr]
+                    r.set_value(props[attr] * scale)
 
 
 class TextPanel(QWidget):

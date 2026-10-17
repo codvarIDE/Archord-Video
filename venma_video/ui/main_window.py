@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
 
 from . import theme
 from ..core import ffmpeg_tools as ft
-from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS
+from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS
 from .timeline import TimelineWidget, format_tc
 from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
 from .titles import render_project_titles
@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
         self.a_split2 = A("Split at Playhead (alt)", self.split_at_playhead, "Ctrl+K")
         self.a_delete = A("&Delete Clip", lambda: self.delete_selected(False), "Delete", "trash")
         self.a_ripple = A("&Ripple Delete", lambda: self.delete_selected(True), "Shift+Delete", "ripple_delete")
+        self.a_keyframe = A("Add &Keyframe", self.add_keyframe_at_playhead, "Alt+K", "keyframe")
         self.a_play = A("&Play / Pause", self.engine.toggle, "Space", "play")
         self.a_start = A("Go to &Start", lambda: self.engine.seek(0), "Home", "skip_back")
         self.a_end = A("Go to &End", lambda: self.engine.seek(self.project.duration()), "End", "skip_fwd")
@@ -218,7 +219,7 @@ class MainWindow(QMainWindow):
         for title, items in (
                 ("File", (self.a_new, self.a_open, self.a_save, self.a_saveas, None, self.a_import, self.a_settings,
                           None, self.a_quit)),
-                ("Edit", (self.a_undo, self.a_redo, None, self.a_split, self.a_delete, self.a_ripple)),
+                ("Edit", (self.a_undo, self.a_redo, None, self.a_split, self.a_delete, self.a_ripple, None, self.a_keyframe)),
                 ("Insert", (self.a_title, self.a_lower, self.a_subtitle, None, self.a_layer, self.a_atrack,
                             self.a_prune))):
             sub = menu.addMenu(title)
@@ -361,7 +362,7 @@ class MainWindow(QMainWindow):
         for tid in ("select", "ripple", "slip", "razor"):
             row.addWidget(self._icon_button(self.tool_actions[tid]))
         row.addSpacing(6); row.addWidget(vsep()); row.addSpacing(6)
-        for a in (self.a_split, self.a_delete):
+        for a in (self.a_split, self.a_delete, self.a_keyframe):
             row.addWidget(self._icon_button(a))
         row.addStretch(1)
         for text, icon, slot, tip in (("Layer", "layer_plus", self.add_video_layer, "Add a video layer (Ctrl+Shift+L)"),
@@ -410,6 +411,7 @@ class MainWindow(QMainWindow):
         c.clipSlipped.connect(self._on_clip_slipped)
         self.props.titleEdited.connect(self._on_title_edit)
         self.view.selected_provider = lambda: self.timeline.canvas.selected
+        self.view.editable_check = lambda clip: not self.project.track_locked(clip.track)   # locked layers can't be grabbed
         self.view.titlePicked.connect(self._on_title_picked)           # click / drag text on the preview
         self.view.titleDragged.connect(self._on_title_dragged)
         self.view.clipDragged.connect(self._on_clip_dragged)               # move / resize an image or video
@@ -420,6 +422,8 @@ class MainWindow(QMainWindow):
         c.trackAddRequested.connect(self._on_track_add)
         c.trackRemoveRequested.connect(self._on_track_remove)
         c.trackMoveRequested.connect(self._on_track_move)
+        c.trackFlagToggled.connect(self._on_track_flag)
+        c.trackReordered.connect(self._on_track_reorder)
         self.engine.timeChanged.connect(self._on_time)
         self.engine.playingChanged.connect(self._on_playing)
         self.engine.message.connect(lambda m: self.statusBar().showMessage(m, 5000))
@@ -429,6 +433,9 @@ class MainWindow(QMainWindow):
         self.text_panel.addRequested.connect(self.add_title)
         self.props.propertyEdited.connect(self._on_property)
         self.props.resetRequested.connect(self._on_reset_props)
+        self.props.keyframeAdded.connect(self._on_keyframe_add)
+        self.props.keyframeRemoved.connect(self._on_keyframe_remove)
+        self.props.keyframesCleared.connect(self._on_keyframes_clear)
 
     # ── environment ──────────────────────────────────────────────────────────
     def _check_environment(self):
@@ -509,6 +516,15 @@ class MainWindow(QMainWindow):
     def _on_time(self, t):
         self.timeline.canvas.set_playhead(t, follow=self.engine.playing)
         self.tc_label.setText(format_tc(t, self.project.fps))
+        # Keep the Properties panel aware of the current clip-local time
+        sid = self.timeline.canvas.selected
+        clip = self.project.clip(sid) if sid else None
+        if clip is not None:
+            t_clip = max(0.0, t - clip.start)
+            self.props.set_playhead_clip_time(t_clip)
+            # Refresh keyframe list on every tick when playing (cheap list update)
+            if self.engine.playing and clip.keyframes:
+                self.props.set_keyframes(clip.keyframes)
 
     def _on_playing(self, playing):
         name = "pause" if playing else "play"
@@ -522,25 +538,43 @@ class MainWindow(QMainWindow):
     def _on_selected(self, cid):
         self._update_clip_panel()
         self.view.update()                              # selection box on the preview
+        # Sync the clip-local time whenever selection changes
+        if cid:
+            clip = self.project.clip(cid)
+            if clip is not None:
+                t_clip = max(0.0, self.engine.t - clip.start)
+                self.props.set_playhead_clip_time(t_clip)
+
+    def _refuse_locked(self, cid):
+        """True (with a status message) if clip ``cid`` is on a locked layer, so the edit must not happen."""
+        c = self.project.clip(cid) if cid else None
+        if c is not None and self.project.track_locked(c.track):
+            self.statusBar().showMessage(f"{self.project.tracks[c.track]['name']} is locked. Click its lock to edit.", 4000)
+            return True
+        return False
 
     def _on_clip_moved(self, cid, track, start):
+        if self._refuse_locked(cid):
+            return
         self.project.move(cid, track, start)
         self.commit("Move Clip")
 
     def _on_clip_trimmed(self, cid, side, edge):
+        if self._refuse_locked(cid):
+            return
         (self.project.trim_left if side == "left" else self.project.trim_right)(cid, edge)
         self.commit("Trim Clip")
 
     def _on_clip_rippled(self, cid, side, edge):
-        if self.project.ripple_trim(cid, side, edge):
+        if not self._refuse_locked(cid) and self.project.ripple_trim(cid, side, edge):
             self.commit("Ripple Trim")
 
     def _on_clip_slipped(self, cid, in_point):
-        if self.project.slip(cid, in_point):
+        if not self._refuse_locked(cid) and self.project.slip(cid, in_point):
             self.commit("Slip Clip")
 
     def _on_split_requested(self, cid, t):
-        if self.project.split(cid, t):
+        if not self._refuse_locked(cid) and self.project.split(cid, t):
             self.commit("Split Clip")
 
     def _on_media_dropped(self, ids, track, t):
@@ -571,6 +605,21 @@ class MainWindow(QMainWindow):
 
     def _on_track_move(self, index, delta):
         if self.project.move_track(index, delta):
+            self.commit("Reorder Layers")
+
+    FLAG_LABELS = {"hidden": ("Hide", "Show"), "locked": ("Lock", "Unlock"), "muted": ("Mute", "Unmute")}
+
+    def _on_track_flag(self, index, key):
+        """Hide / lock / mute switch of a layer, clicked in the timeline header."""
+        if not self.project.toggle_track_flag(index, key):
+            return
+        track = self.project.tracks[index]
+        verb = self.FLAG_LABELS[key][0 if track.get(key) else 1]       # switched on -> "Hide" / "Lock" / "Mute"
+        self.commit(f"{verb} {track['name']}")
+
+    def _on_track_reorder(self, src, dst):
+        """A layer was dragged to a new place in the stack."""
+        if self.project.reorder_track(src, dst):
             self.commit("Reorder Layers")
 
     def remove_empty_layers(self):
@@ -611,7 +660,7 @@ class MainWindow(QMainWindow):
         self.engine.seek(first.start)
 
     def add_title(self, preset="Title"):
-        """Add a title clip at the playhead (on the top video track) using a style preset."""
+        """Add a title clip at the playhead (in front of everything added before it) using a style preset."""
         c = self.project.add_title(self.engine.t, **TITLE_PRESETS.get(preset, {}))
         self.commit(f"Add {preset}")
         self.timeline.canvas.select(c.id)
@@ -634,12 +683,24 @@ class MainWindow(QMainWindow):
     def _on_clip_dragged(self, cid, vals):
         """Live update while an image / video is dragged or resized on the preview (committed on release)."""
         c = self.project.clip(cid)
-        if c is None:
+        if c is None or self.project.track_locked(c.track):
             return
         if self.engine.playing:
             self.engine.pause()                         # editing a picture is done on a still frame
-        for k, v in vals.items():
-            setattr(c, k, v)
+        t_clip = max(0.0, self.engine.t - c.start)
+        if c.keyframes:
+            # CapCut behavior: when clip has keyframes, moving or resizing in preview updates
+            # the nearest keyframe (if within 0.15s) or creates a new keyframe at current playhead!
+            kf = c.keyframe_at(t_clip, tol=0.15)
+            if kf is not None:
+                kf.values.update(vals)
+            else:
+                c.set_keyframe(t_clip, **vals)
+            self.props.set_keyframes(c.keyframes)
+            self.timeline.canvas.invalidate()
+        else:
+            for k, v in vals.items():
+                setattr(c, k, v)
         self.dirty = True
         self.props.set_clip(c, self.project.media.get(c.media_id), self.project.fps)   # keep the sliders in sync
         self.view.update()                              # the selection box follows the mouse at once
@@ -648,6 +709,9 @@ class MainWindow(QMainWindow):
 
     def _on_title_edit(self, key, value):
         sid = self.timeline.canvas.selected
+        if sid and self._refuse_locked(sid):
+            self._update_clip_panel()
+            return
         if sid and self.project.set_title(sid, **{key: value}):
             self.dirty = True
             self.engine.refresh()
@@ -676,7 +740,7 @@ class MainWindow(QMainWindow):
 
     def delete_selected(self, ripple):
         sid = self.timeline.canvas.selected
-        if not sid:
+        if not sid or self._refuse_locked(sid):
             return
         self.timeline.canvas.select(None)
         self.project.delete([sid], ripple=ripple)
@@ -687,17 +751,78 @@ class MainWindow(QMainWindow):
         c = self.project.clip(sid) if sid else None
         if c is None:
             return
+        if self._refuse_locked(sid):
+            self._update_clip_panel()                    # put the sliders back
+            return
         setattr(c, attr, value)
+        # If the clip has keyframes and property is animatable, also update nearest keyframe if within 0.1s of playhead
+        if c.keyframes and attr in KEYFRAMED_PROPS:
+            t_clip = max(0.0, self.engine.t - c.start)
+            kf = c.keyframe_at(t_clip, tol=0.1)
+            if kf is not None:
+                kf.values[attr] = float(value)
+                self.props.set_keyframes(c.keyframes)
+                self.timeline.canvas.invalidate()
         self.dirty = True
         self.engine.refresh()
         self._edit_timer.start()
 
+    def add_keyframe_at_playhead(self):
+        """Action handler for adding/toggling a keyframe at the current playhead for the selected clip."""
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if not c:
+            self.statusBar().showMessage("Select a clip to add a keyframe.", 3000)
+            return
+        t_clip = max(0.0, self.engine.t - c.start)
+        self._on_keyframe_add(t_clip)
+
+    def _on_keyframe_add(self, t_clip):
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if not c or self._refuse_locked(sid):
+            return
+        # Record current position, scale, rotation and opacity
+        cur_props = c.props_at(t_clip)
+        vals = {p: cur_props.get(p, getattr(c, p)) for p in KEYFRAMED_PROPS}
+        c.set_keyframe(t_clip, **vals)
+        self.props.set_keyframes(c.keyframes)
+        self.timeline.canvas.invalidate()
+        self.commit(f"Add Keyframe @ {t_clip:.2f}s")
+
+    def _on_keyframe_remove(self, t_clip):
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if not c or self._refuse_locked(sid):
+            return
+        if c.remove_keyframe(t_clip, tol=0.1):
+            self.props.set_keyframes(c.keyframes)
+            self.timeline.canvas.invalidate()
+            self.commit(f"Remove Keyframe @ {t_clip:.2f}s")
+        else:
+            self.statusBar().showMessage("No keyframe near the playhead to remove.", 3000)
+
+    def _on_keyframes_clear(self):
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if not c or self._refuse_locked(sid):
+            return
+        if not c.keyframes:
+            return
+        c.clear_keyframes()
+        self.props.set_keyframes(c.keyframes)
+        self.timeline.canvas.invalidate()
+        self.commit("Clear Keyframes")
+
     def _on_reset_props(self):
         sid = self.timeline.canvas.selected
         c = self.project.clip(sid) if sid else None
-        if c:
+        if c and not self._refuse_locked(sid):
             for k, v in CLIP_DEFAULTS.items():
                 setattr(c, k, v)
+            c.clear_keyframes()
+            self.props.set_keyframes(c.keyframes)
+            self.timeline.canvas.invalidate()
             self.commit("Reset Clip Effects")
 
     # ── media import ─────────────────────────────────────────────────────────

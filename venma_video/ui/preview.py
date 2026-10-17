@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import QWidget
 
 from ..core import ffmpeg_tools as ft
 from . import theme
-from .titles import draw_titles, layout as title_layout
+from .titles import draw_title, layout as title_layout
 
 try:
     from PyQt5.QtMultimedia import QAudio, QAudioFormat, QAudioOutput, QAudioDeviceInfo
@@ -45,10 +45,11 @@ _NOWIN = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 # ══ view ══════════════════════════════════════════════════════════════════════════════════════
 class PreviewView(QWidget):
-    """Paints the current frame, letter-boxed to the project's aspect ratio.
+    """Paints the frame: every visible layer, one by one, in stacking order (last added layer in front).
 
-    Titles can be edited directly on the picture: drag a title to move it, drag a corner handle of the
-    selected title to resize it. The view never edits the project itself; it emits signals and the
+    Pictures and titles are all drawn here by Qt, so moving / resizing a layer is instant and what is
+    drawn on top is always what a click picks. Drag a layer to move it, drag a corner handle of the
+    selected layer to resize it. The view never edits the project itself; it emits signals and the
     main window applies them (so undo, the Properties panel and saving all stay in one place).
     """
 
@@ -63,10 +64,12 @@ class PreviewView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.aspect = 16 / 9
-        self.img = None
-        self.titles_provider = None          # callable -> title clips visible at the current time
+        self.layer_images = {}               # picture clip id -> latest decoded QImage of that layer
+        self.stack_provider = None           # callable -> every visible clip (pictures + titles), bottom first
         self.selected_provider = None        # callable -> id of the selected clip (or None)
+        self.editable_check = None           # callable(clip) -> False for a clip on a locked layer (can't be picked / moved)
         self.layers_provider = None          # callable -> [(clip, (cx, cy, w, h) as frame fractions)] bottom first
+        self.time_provider = None            # callable -> current playhead time
         self._drag = None                    # active gesture, see mousePressEvent
         self._guides = (False, False)        # show the vertical / horizontal centre guide
         self.setMinimumSize(200, 120)
@@ -85,44 +88,49 @@ class PreviewView(QWidget):
             h, w = ah, int(ah * self.aspect)
         return QRect((self.width() - w) // 2, (self.height() - h) // 2, w, h)
 
-    def set_image(self, img):
-        self.img = img
+    def set_layer_image(self, clip_id, img):
+        self.layer_images[clip_id] = img
         self.update(self._frame_rect())
 
-    def show_black(self):
-        if self.img is not None:
-            self.img = None
+    def forget_layers(self, keep):
+        """Drop the frames of layers that are no longer visible (``keep`` = ids that still are)."""
+        gone = [cid for cid in self.layer_images if cid not in keep]
+        for cid in gone:
+            del self.layer_images[cid]
+        if gone:
             self.update(self._frame_rect())
 
-    # ── title geometry / hit testing ─────────────────────────────────────────────────────────
-    def _title_boxes(self):
-        """[(clip, box QRectF)] for visible, non-empty titles, bottom-most first."""
-        if self.titles_provider is None:
+    def clear_layers(self):
+        if self.layer_images:
+            self.layer_images.clear()
+            self.update(self._frame_rect())
+
+    # ── geometry / hit testing (all in stacking order, bottom first) ──────────────────────────
+    def _stack_boxes(self):
+        """[(clip, box QRectF)] for every visible, non-empty picture and title, bottom-most first."""
+        if self.stack_provider is None:
             return []
         frame = QRectF(self._frame_rect())
+        pic = {}
+        if self.layers_provider is not None:
+            for c, (cx, cy, w, h) in self.layers_provider() or []:
+                pic[c.id] = QRectF(frame.x() + (cx - w / 2) * frame.width(), frame.y() + (cy - h / 2) * frame.height(),
+                                   w * frame.width(), h * frame.height())
         out = []
-        for c in self.titles_provider() or []:
-            lay = title_layout(c.title, frame)
-            if lay is not None:
-                out.append((c, lay[2]))
-        return out
-
-    def _layer_boxes(self):
-        """[(clip, box QRectF)] for the picture layers visible now (images / videos), bottom-most first."""
-        if self.layers_provider is None:
-            return []
-        f = QRectF(self._frame_rect())
-        out = []
-        for c, (cx, cy, w, h) in self.layers_provider() or []:
-            out.append((c, QRectF(f.x() + (cx - w / 2) * f.width(), f.y() + (cy - h / 2) * f.height(),
-                                  w * f.width(), h * f.height())))
+        for c in self.stack_provider() or []:
+            if c.title is not None:
+                lay = title_layout(c.title, frame)
+                if lay is not None:
+                    out.append((c, lay[2]))
+            elif c.id in pic:
+                out.append((c, pic[c.id]))
         return out
 
     def _selected_box(self):
         sid = self.selected_provider() if self.selected_provider else None
         if not sid:
             return None, None
-        for c, box in self._title_boxes() + self._layer_boxes():
+        for c, box in self._stack_boxes():
             if c.id == sid:
                 return c, box
         return None, None
@@ -130,9 +138,12 @@ class PreviewView(QWidget):
     def _corners(self, box):
         return {"tl": box.topLeft(), "tr": box.topRight(), "bl": box.bottomLeft(), "br": box.bottomRight()}
 
+    def _editable(self, c):
+        return self.editable_check is None or self.editable_check(c)
+
     def _handle_at(self, pos):
         c, box = self._selected_box()
-        if c is None:
+        if c is None or not self._editable(c):
             return None, None
         r = self.HANDLE + 3
         for name, pt in self._corners(box).items():
@@ -141,13 +152,10 @@ class PreviewView(QWidget):
         return None, None
 
     def _title_at(self, pos):
-        """Top-most title, else top-most picture layer, under ``pos`` (titles always sit above pictures)."""
-        for c, box in reversed(self._title_boxes()):          # top-most first
+        """The front-most layer (picture or title) under ``pos``: the one painted last wins."""
+        for c, box in reversed(self._stack_boxes()):
             if box.adjusted(-4, -4, 4, 4).contains(pos):
-                return c
-        for c, box in reversed(self._layer_boxes()):
-            if box.adjusted(-4, -4, 4, 4).contains(pos):
-                return c
+                return c if self._editable(c) else None      # a locked layer is "glass": it can't be grabbed
         return None
 
     # ── mouse ────────────────────────────────────────────────────────────────────────────────
@@ -157,21 +165,33 @@ class PreviewView(QWidget):
         pos = QPointF(e.pos())
         frame = QRectF(self._frame_rect())
         c, corner = self._handle_at(pos)
+        t_now = self.time_provider() if self.time_provider else 0.0
         if c is not None:
             _, box = self._selected_box()
             center = box.center()
             d0 = max(4.0, math.hypot(pos.x() - center.x(), pos.y() - center.y()))
             pic = c.title is None
+            if pic and hasattr(c, "props_at"):
+                t_clip = max(0.0, t_now - c.start)
+                s0 = float(c.props_at(t_clip).get("scale", c.scale))
+            else:
+                s0 = float(c.scale if pic else c.title["size"])
             self._drag = dict(mode="resize", id=c.id, center=center, d0=d0, pic=pic,
-                              size0=float(c.scale if pic else c.title["size"]), changed=False)
+                              size0=s0, changed=False)
             return
         c = self._title_at(pos)
         if c is not None:
             self.titlePicked.emit(c.id)
             pic = c.title is None
+            if pic and hasattr(c, "props_at"):
+                t_clip = max(0.0, t_now - c.start)
+                pr = c.props_at(t_clip)
+                cur_x, cur_y = float(pr.get("pos_x", c.pos_x)), float(pr.get("pos_y", c.pos_y))
+            else:
+                cur_x = float(c.pos_x if pic else c.title["pos_x"])
+                cur_y = float(c.pos_y if pic else c.title["pos_y"])
             self._drag = dict(mode="move", id=c.id, start=pos, pic=pic,
-                              x0=float(c.pos_x if pic else c.title["pos_x"]),
-                              y0=float(c.pos_y if pic else c.title["pos_y"]), frame=frame, changed=False)
+                              x0=cur_x, y0=cur_y, frame=frame, changed=False)
             self.setCursor(Qt.SizeAllCursor)
             return
         super().mousePressEvent(e)
@@ -241,16 +261,32 @@ class PreviewView(QWidget):
         p.fillRect(self.rect(), QColor(theme.T["canvas"]))
         r = self._frame_rect()
         p.fillRect(r, Qt.black)
-        if self.img is not None and not self.img.isNull():
-            if self.img.width() != r.width() or self.img.height() != r.height():
-                p.setRenderHint(QPainter.SmoothPixmapTransform)
-            p.drawImage(r, self.img)
-        if self.titles_provider is not None:        # titles are painted over the frame, so editing them is instant
-            clips = self.titles_provider()
-            if clips:
-                p.setClipRect(r)
-                draw_titles(p, QRectF(r), clips)
-                p.setClipping(False)
+        if self.stack_provider is not None:
+            frame = QRectF(r)
+            p.setClipRect(r)
+            for c, box in self._stack_boxes():                      # bottom layer first, last added on top
+                t_now = self.time_provider() if self.time_provider else 0.0
+                t_clip = max(0.0, t_now - c.start)
+                props = c.props_at(t_clip) if hasattr(c, "props_at") else {}
+                opacity = props.get("opacity", c.opacity)
+                rotation = props.get("rotation", getattr(c, "rotation", 0.0))
+                if c.title is not None:
+                    draw_title(p, frame, c.title, opacity)
+                else:
+                    img = self.layer_images.get(c.id)
+                    if img is not None and not img.isNull():
+                        p.save()
+                        p.setRenderHint(QPainter.SmoothPixmapTransform)
+                        p.setRenderHint(QPainter.Antialiasing)
+                        p.setOpacity(max(0.0, min(1.0, opacity)))
+                        if abs(rotation) > 1e-3:
+                            ctr = box.center()
+                            p.translate(ctr)
+                            p.rotate(rotation)
+                            p.translate(-ctr)
+                        p.drawImage(box, img)
+                        p.restore()
+            p.setClipping(False)
         self._paint_overlay(p, r)
 
     def _paint_overlay(self, p, r):
@@ -264,7 +300,7 @@ class PreviewView(QWidget):
             if gy:
                 p.drawLine(r.left(), r.center().y(), r.right(), r.center().y())
         c, box = self._selected_box()
-        if c is None:
+        if c is None or not self._editable(c):
             return
         p.setRenderHint(QPainter.Antialiasing, False)
         p.setPen(QPen(accent, 1, Qt.DashLine))
@@ -397,19 +433,23 @@ class _AudioStream(_Stream):
 
 
 class _StillWorker(QThread):
-    """Decodes single frames for scrubbing. Only the NEWEST request is kept (latest wins)."""
-    ready = pyqtSignal(object, object)          # key, raw bytes (or b"")
+    """Decodes single frames for scrubbing. For every slot (one per layer) only the NEWEST request is kept."""
+    ready = pyqtSignal(object, object, object)          # slot, key, raw bytes (or b"")
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cv = threading.Condition()
-        self._req = None
+        self._req = {}                                   # slot -> (key, cmd, size)
         self._stop = False
 
-    def request(self, key, cmd, size):
+    def request(self, slot, key, cmd, size):
         with self._cv:
-            self._req = (key, cmd, size)
+            self._req[slot] = (key, cmd, size)
             self._cv.notify()
+
+    def drop(self, slot):
+        with self._cv:
+            self._req.pop(slot, None)
 
     def shutdown(self):
         with self._cv:
@@ -419,12 +459,12 @@ class _StillWorker(QThread):
     def run(self):
         while True:
             with self._cv:
-                while self._req is None and not self._stop:
+                while not self._req and not self._stop:
                     self._cv.wait()
                 if self._stop:
                     return
-                key, cmd, size = self._req
-                self._req = None
+                slot = next(iter(self._req))
+                key, cmd, size = self._req.pop(slot)
             raw = b""
             try:
                 r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -433,7 +473,7 @@ class _StillWorker(QThread):
                     raw = r.stdout[:size]
             except Exception:
                 pass
-            self.ready.emit(key, raw)
+            self.ready.emit(slot, key, raw)
 
 
 # ══ engine ════════════════════════════════════════════════════════════════════════════════════
@@ -459,13 +499,13 @@ class PreviewEngine(QObject):
         self._start_req = 0.0
         self._base_t = self._base_m = 0.0
         self._last_emit = 0.0
-        self._vsess = self._vnext = None
+        self._vs = {}                      # picture clip id -> _VideoStream playing now (one ffmpeg per video layer)
+        self._vn = {}                      # clip id -> stream pre-decoding the clip that starts within LOOKAHEAD
         self._achain = []
         self._dead = []
-        self._shown_img = None
-        self._black = True
-        self._cache = OrderedDict()
-        self._want = None
+        self._shown = {}                   # clip id -> key of the still currently on screen for that layer
+        self._want = {}                    # clip id -> key of the still requested last
+        self._cache = OrderedDict()        # still key -> QImage
 
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
@@ -476,8 +516,9 @@ class PreviewEngine(QObject):
         self._seek_timer.setInterval(70)
         self._seek_timer.timeout.connect(self._after_seek)
 
-        self.view.titles_provider = self._titles_now
+        self.view.stack_provider = self._stack_now
         self.view.layers_provider = self._layers_now
+        self.view.time_provider = lambda: self.t
         self.stills = _StillWorker(self)
         self.stills.ready.connect(self._on_still)
         self.stills.start()
@@ -545,13 +586,14 @@ class PreviewEngine(QObject):
                 return
             self._apending = self._apending[n:]
 
-    def _titles_now(self):
-        return self.project.titles_at(self.t) if self.project else []
+    def _stack_now(self):
+        """Every clip painted on the frame now, bottom first (a layer above is in front of the ones below)."""
+        return self.project.visual_clips_at(self.t) if self.project else []
 
     def _layers_now(self):
         """Picture clips visible now with their on-frame boxes (so they can be picked / moved / resized)."""
         p = self.project
-        return [(c, p.fit_box(c)) for c in p.video_clips_at(self.t)] if p else []
+        return [(c, p.fit_box(c, self.t - c.start)) for c in p.video_clips_at(self.t)] if p else []
 
     # ── public API (same as before) ──────────────────────────────────────────────────────────
     def set_project(self, project, reset=False):
@@ -569,7 +611,7 @@ class PreviewEngine(QObject):
             else:
                 self._resync()
         else:
-            self._shown_img = None
+            self._shown.clear()
             self._show_still()
         self.view.update()
 
@@ -580,7 +622,7 @@ class PreviewEngine(QObject):
         if self.playing:
             self._resync()
         else:
-            self._shown_img = None
+            self._shown.clear()
             self._show_still()
         self.view.update()
 
@@ -592,7 +634,7 @@ class PreviewEngine(QObject):
             self._stop_streams()
             self._close_audio()
             self._seek_timer.start()
-        self._shown_img = None
+        self._shown.clear()
         self._show_still()
         self._emit_time(force=True)
 
@@ -620,7 +662,7 @@ class PreviewEngine(QObject):
         self._close_audio()
         self.playingChanged.emit(False)
         if was and self.project:
-            self._shown_img = None
+            self._shown.clear()
             self._show_still()
 
     def shutdown(self):
@@ -641,20 +683,24 @@ class PreviewEngine(QObject):
             self._dead.append(s)
 
     def _stop_streams(self):
-        self._kill(self._vsess)
-        self._kill(self._vnext)
-        for s in self._achain:
-            self._kill(s)
-        self._vsess = self._vnext = None
+        for st in list(self._vs.values()) + list(self._vn.values()):
+            self._kill(st)
+        self._vs, self._vn = {}, {}
+        for st in self._achain:
+            self._kill(st)
         self._achain = []
         self._apending = b""
+
+    def _lsize(self, c):
+        """Pixel size layer ``c`` is decoded at (its fitted size; independent of position, so moving is free)."""
+        m = self.project.media[c.media_id]
+        return ft.layer_size(m.width, m.height, self._pw, self._ph, c.scale)
 
     def _vkey(self, c):
         m = self.project.media[c.media_id]
         return (c.id, m.path, round(c.start, 4), round(c.in_point, 4), round(c.duration, 4),
                 round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3),
-                round(c.scale, 4), round(c.pos_x, 4), round(c.pos_y, 4),
-                self._pw, self._ph, self._pfps)
+                self._lsize(c), self._pfps)
 
     def _akey(self, c):
         m = self.project.media[c.media_id]
@@ -663,9 +709,9 @@ class PreviewEngine(QObject):
 
     def _start_video(self, c, t0):
         m = self.project.media[c.media_id]
-        cmd = ft.video_stream_cmd(m.path, c.in_point + (t0 - c.start), c.end - t0,
-                                  self._pw, self._ph, self._pfps, c)
-        s = _VideoStream(cmd, self._pw, self._ph, self._pfps, self._vkey(c), t0, c.end, self)
+        w, h = self._lsize(c)
+        cmd = ft.layer_stream_cmd(m.path, c.in_point + (t0 - c.start), c.end - t0, w, h, self._pfps, c)
+        s = _VideoStream(cmd, w, h, self._pfps, self._vkey(c), t0, c.end, self)
         s.failed.connect(self.message)
         s.start()
         return s
@@ -680,13 +726,15 @@ class PreviewEngine(QObject):
         return s
 
     def _audio_src(self, t):
-        """Clip that supplies sound at t: an audio-track clip, else the video clip's own audio."""
+        """Clip that supplies sound at t: an audio-track clip, else the front-most video layer that has sound."""
         p = self.project
         c = p.audio_clip_at(t)
         if c is None:
-            v = p.top_video_clip_at(t)
-            if v is not None and p.media[v.media_id].kind == "video":
-                c = v
+            for v in reversed(p.video_clips_at(t, include_hidden=True)):    # front-most first; hiding a layer keeps its sound
+                m = p.media[v.media_id]
+                if m.kind == "video" and m.has_audio and not p.track_muted(v.track):
+                    c = v
+                    break
         return c if c is not None and p.media[c.media_id].has_audio else None
 
     def _sync_sessions(self):
@@ -696,43 +744,37 @@ class PreviewEngine(QObject):
         if not p:
             return False
 
-        # video -------------------------------------------------------------------------------
-        vc = p.top_video_clip_at(t)
-        vm = p.media[vc.media_id] if vc else None
-        if vc is not None and vm.kind == "video":
-            self._shown_img = None
-            self._black = False
-            key = self._vkey(vc)
-            if self._vsess is None or self._vsess.key != key:
-                if self._vnext is not None and self._vnext.key == key:
-                    self._kill(self._vsess)
-                    self._vsess, self._vnext = self._vnext, None
-                else:
-                    self._kill(self._vsess)
-                    self._vsess = self._start_video(vc, t)
-                    cold = True
-        else:
-            if self._vsess is not None:
-                self._kill(self._vsess)
-                self._vsess = None
-            if vc is None:
-                if not self._black:
-                    self._black = True
-                    self._shown_img = None
-                    self.view.show_black()
-            elif self._shown_img != vc.id:                  # image clip: one still frame
-                self._black = False
-                self._shown_img = vc.id
-                self._show_still()
-        nv = p.top_video_clip_at(t + self.LOOKAHEAD)
-        if nv is not None and p.media[nv.media_id].kind == "video":
-            nk = self._vkey(nv)
-            if (self._vsess is None or self._vsess.key != nk) and (self._vnext is None or self._vnext.key != nk):
-                self._kill(self._vnext)
-                self._vnext = self._start_video(nv, max(nv.start, t))
-        elif self._vnext is not None:
-            self._kill(self._vnext)
-            self._vnext = None
+        # video: one decoder per visible video layer; the view paints them in stacking order -------------
+        visible = p.video_clips_at(t)
+        want = {c.id: c for c in visible if p.media[c.media_id].kind == "video"}
+        for c in want.values():
+            key = self._vkey(c)
+            cur = self._vs.get(c.id)
+            if cur is not None and cur.key == key:
+                continue
+            nxt = self._vn.get(c.id)
+            self._kill(cur)
+            if nxt is not None and nxt.key == key:
+                self._vs[c.id] = self._vn.pop(c.id)
+            else:
+                self._vs[c.id] = self._start_video(c, t)
+                cold = True
+        for cid in [i for i in self._vs if i not in want]:
+            self._kill(self._vs.pop(cid))
+        for c in visible:                                        # photos: one still each, only when it changed
+            if p.media[c.media_id].kind == "image":
+                self._ensure_still(c)
+        self.view.forget_layers({c.id for c in visible})
+        ahead = {c.id: c for c in p.video_clips_at(t + self.LOOKAHEAD) if p.media[c.media_id].kind == "video"}
+        for c in ahead.values():
+            nk = self._vkey(c)
+            cur, vn = self._vs.get(c.id), self._vn.get(c.id)
+            if (cur is not None and cur.key == nk) or (vn is not None and vn.key == nk):
+                continue
+            self._kill(vn)
+            self._vn[c.id] = self._start_video(c, max(c.start, t))
+        for cid in [i for i in self._vn if i not in ahead]:
+            self._kill(self._vn.pop(cid))
 
         # audio -------------------------------------------------------------------------------
         if self.aout is not None:
@@ -763,8 +805,7 @@ class PreviewEngine(QObject):
         self._hold = False
         self._stop_streams()
         self._reset_audio()
-        self._shown_img = None
-        self._black = False
+        self._shown.clear()
         self._enter_starting()
         self._show_still()
         self._sync_sessions()
@@ -781,7 +822,7 @@ class PreviewEngine(QObject):
 
     # ── clock / playback loop ────────────────────────────────────────────────────────────────
     def _streams_ready(self):
-        if self._vsess is not None and not self._vsess.ready():
+        if any(not st.ready() for st in self._vs.values()):
             return False
         first = next((c for c in self._achain if not c.drained()), None)
         if first is not None and self.t + 0.05 >= first.t0 and not first.ready():
@@ -812,12 +853,11 @@ class PreviewEngine(QObject):
             self._enter_starting()
             self._emit_time(force=True)
             return
-        s = self._vsess
-        if s is not None:
-            raw = s.pop_due(t)
+        for cid, st in list(self._vs.items()):
+            raw = st.pop_due(t)
             if raw is not None:
-                img = QImage(raw, s.w, s.h, 3 * s.w, QImage.Format_RGB888).copy()
-                self.view.set_image(img)
+                img = QImage(raw, st.w, st.h, 3 * st.w, QImage.Format_RGB888).copy()
+                self.view.set_layer_image(cid, img)
         self._feed_audio()
         self._emit_time()
 
@@ -829,69 +869,66 @@ class PreviewEngine(QObject):
             self.timeChanged.emit(self.t)
 
     # ── still frames (scrubbing, frame step, paused display) ─────────────────────────────────
-    def _show_still(self):
+    def _still_key(self, c):
+        """Cache key of the single frame of layer ``c`` that is on screen at self.t (position / scale are NOT part
+        of it: they are applied when painting, so moving or resizing never re-decodes anything)."""
         p, t = self.project, self.t
-        if not p:
-            return
-        layers = p.video_clips_at(t)
-        if len(layers) > 1:                                  # several layers visible: show them stacked
-            sig = tuple((c.media_id, round((t - c.start + c.in_point) * p.fps), round(c.opacity, 3),
-                         round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3),
-                         round(c.scale, 4), round(c.pos_x, 4), round(c.pos_y, 4)) for c in layers)
-            key = ("@layers", sig, self._pw, self._ph)
-            self._want = key
-            self._black = False
-            img = self._cache.get(key)
-            if img is not None:
-                self._cache.move_to_end(key)
-                self.view.set_image(img)
-                return
-            try:
-                cmd = ft.composite_still_cmd(p, t, self._pw, self._ph)
-            except RuntimeError as e:
-                self.message.emit(str(e))
-                return
-            self.stills.request(key, cmd, self._pw * self._ph * 3)
-            return
-        vc = p.top_video_clip_at(t)
-        if vc is None:
-            self._want = None
-            self._black = True
-            self.view.show_black()
-            return
-        m = p.media[vc.media_id]
+        m = p.media[c.media_id]
+        w, h = self._lsize(c)
         if m.kind == "image":
             src = 0.0
         else:
-            src = vc.in_point + (t - vc.start)
+            src = c.in_point + (t - c.start)
             src = min(max(0.0, src), max(0.0, m.duration - 1.0 / max(1, p.fps)))
-        key = (m.path, round(src * p.fps), self._pw, self._ph,
-               round(vc.brightness, 3), round(vc.contrast, 3), round(vc.saturation, 3),
-               round(vc.scale, 4), round(vc.pos_x, 4), round(vc.pos_y, 4))
-        self._want = key
-        self._black = False
+        return ("L", m.path, round(src * p.fps), w, h, m.kind == "image",
+                round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3)), src
+
+    def _ensure_still(self, c):
+        """Put one decoded frame of layer ``c`` on screen (from the cache, else decode it in the background)."""
+        key, src = self._still_key(c)
+        if self._shown.get(c.id) == key:
+            return
+        self._shown[c.id] = key
+        self._want[c.id] = key
         img = self._cache.get(key)
         if img is not None:
             self._cache.move_to_end(key)
-            self.view.set_image(img)
+            self.view.set_layer_image(c.id, img)
             return
+        m = self.project.media[c.media_id]
         try:
-            cmd = ft.still_cmd(m.path, m.kind, src, self._pw, self._ph, vc)
+            cmd = ft.layer_still_cmd(m.path, m.kind, src, key[3], key[4], c)
         except RuntimeError as e:
             self.message.emit(str(e))
             return
-        self.stills.request(key, cmd, self._pw * self._ph * 3)
+        self.stills.request(c.id, key, cmd, key[3] * key[4] * (4 if key[5] else 3))
 
-    def _on_still(self, key, raw):
+    def _show_still(self):
+        """Paused / scrubbing display: one frame of every visible layer (the view paints them in stacking order)."""
+        p = self.project
+        if not p:
+            return
+        visible = p.video_clips_at(self.t)
+        for c in visible:
+            self._ensure_still(c)
+        ids = {c.id for c in visible}
+        for cid in [i for i in self._want if i not in ids]:
+            self._want.pop(cid, None)
+            self._shown.pop(cid, None)
+            self.stills.drop(cid)
+        self.view.forget_layers(ids)
+        self.view.update(self.view._frame_rect())
+
+    def _on_still(self, slot, key, raw):
         if not raw:
-            if key == self._want:
+            if self._want.get(slot) == key:
                 self.message.emit("Preview: could not decode this frame.")
             return
-        img = QImage(raw, self._pw, self._ph, 3 * self._pw, QImage.Format_RGB888).copy()
-        if key[2] == self._pw and key[3] == self._ph:
-            self._cache[key] = img
-            while len(self._cache) > 48:
-                self._cache.popitem(last=False)
-        # while the clock runs, live frames own the screen; otherwise show the requested still
-        if key == self._want and (not self.playing or self._starting or self._hold or self._vsess is None):
-            self.view.set_image(img)
+        w, h, alpha = key[3], key[4], key[5]
+        img = QImage(raw, w, h, (4 if alpha else 3) * w, QImage.Format_RGBA8888 if alpha else QImage.Format_RGB888).copy()
+        self._cache[key] = img
+        while len(self._cache) > 32:
+            self._cache.popitem(last=False)
+        # while the clock runs, live frames own a video layer; otherwise show the requested still
+        if self._want.get(slot) == key and (not self.playing or self._starting or self._hold or slot not in self._vs):
+            self.view.set_layer_image(slot, img)

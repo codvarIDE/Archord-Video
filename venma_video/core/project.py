@@ -2,7 +2,7 @@
 
 Time is in seconds. A clip occupies [start, start + duration) on a track and plays the source
 from ``in_point``. Tracks are listed top-to-bottom as shown in the timeline; for video tracks
-the one nearer the top of the list is composited on top.
+the one nearer the top of the list is composited on top (in a typed project the last layer added is the top one).
 """
 import copy
 import itertools
@@ -44,14 +44,22 @@ DEFAULT_TRACKS = [
     {"name": "A2", "kind": "audio"},
 ]
 
-# CapCut-style typed layers (new projects): every layer holds ONE kind of content and is created
-# automatically when you add that kind. Stacking order, top to bottom: text, photo, video, audio.
+# CapCut-style layers (new projects). Every PICTURE layer (video, photo and text clips can share one) is
+# stacked in the order it was added: the first layer is at the bottom, each new one goes on top of it, so the
+# LAST added layer is painted last (in front). Audio tracks always sit below all picture layers.
 TYPED_TRACKS = [
     {"name": "Video", "kind": "video", "type": "video"},
     {"name": "Audio", "kind": "audio", "type": "audio"},
 ]
-TYPE_RANK = {"text": 0, "image": 1, "video": 2, "audio": 3}
-TYPE_LABEL = {"text": "Text", "image": "Photo", "video": "Video", "audio": "Audio"}
+VISUAL_KINDS = ("video", "image", TEXT_KIND)         # clip kinds that are drawn on the frame
+TYPE_RANK = {"text": 0, "image": 0, "video": 0, "audio": 3}
+TYPE_LABEL = {"text": "Text", "image": "Photo", "video": "Layer", "audio": "Audio"}
+
+# Per-layer switches, stored on the track dict (so they are saved, undone and redone with the project):
+#   hidden: the layer's pictures are not painted (preview) or rendered (export)
+#   locked: the layer's clips can't be moved, trimmed, split, deleted or edited, and nothing can be dropped on it
+#   muted:  the layer's sound is silenced (preview and export)
+TRACK_FLAGS = ("hidden", "locked", "muted")
 
 PRESETS = [
     ("1080p  ·  1920 × 1080", 1920, 1080),
@@ -63,8 +71,29 @@ PRESETS = [
 
 # clip colour/effect defaults
 # scale: 1.0 = the picture fitted to the frame; pos_x / pos_y: where its centre sits, as a fraction of the frame.
+# rotation: degrees, clockwise.
 CLIP_DEFAULTS = dict(volume=1.0, opacity=1.0, brightness=0.0, contrast=1.0, saturation=1.0,
-                     scale=1.0, pos_x=0.5, pos_y=0.5)
+                     scale=1.0, pos_x=0.5, pos_y=0.5, rotation=0.0)
+
+# Properties that can be keyframed (animated over time within a clip).
+KEYFRAMED_PROPS = ("pos_x", "pos_y", "scale", "rotation", "opacity")
+
+
+class Keyframe:
+    """A single keyframe: a time offset within the clip (0 = clip start) and the animated values it sets."""
+    def __init__(self, t, **values):
+        self.t = float(t)          # seconds from clip start
+        self.values = {k: float(v) for k, v in values.items() if k in KEYFRAMED_PROPS}
+
+    def to_dict(self):
+        d = dict(t=self.t)
+        d.update(self.values)
+        return d
+
+    @staticmethod
+    def from_dict(d):
+        d = dict(d)
+        return Keyframe(d.pop("t"), **d)
 
 
 class MediaItem:
@@ -101,6 +130,10 @@ class Clip:
             setattr(self, k, props.get(k, v))
         t = props.get("title")                        # None for media clips, a style dict for titles
         self.title = None if t is None else dict(TITLE_DEFAULTS, **t)
+        # Keyframes: sorted list of Keyframe objects (by .t = seconds from clip start)
+        kf_list = props.get("keyframes") or []
+        self.keyframes = sorted([Keyframe.from_dict(k) if isinstance(k, dict) else k
+                                 for k in kf_list], key=lambda k: k.t)
 
     @property
     def end(self):
@@ -112,6 +145,8 @@ class Clip:
         d.update({k: getattr(self, k) for k in CLIP_DEFAULTS})
         if self.title is not None:
             d["title"] = dict(self.title)
+        if self.keyframes:
+            d["keyframes"] = [kf.to_dict() for kf in self.keyframes]
         return d
 
     @staticmethod
@@ -119,6 +154,90 @@ class Clip:
         d = dict(d)
         return Clip(d.pop("id"), d.pop("media_id"), d.pop("track"), d.pop("start"),
                     d.pop("in_point"), d.pop("duration"), **d)
+
+    # ── keyframe interpolation ──────────────────────────────────────────────
+    def interpolate(self, t_clip):
+        """Return a dict of interpolated animated property values at ``t_clip`` seconds into this clip.
+
+        Returns an empty dict when there are no keyframes (use the static clip attributes instead).
+        For each property, linearly interpolates between surrounding keyframes and clamps at the ends.
+        """
+        if not self.keyframes:
+            return {}
+        kfs = self.keyframes
+        # Clamp to range
+        if t_clip <= kfs[0].t:
+            return dict(kfs[0].values)
+        if t_clip >= kfs[-1].t:
+            return dict(kfs[-1].values)
+        # Find surrounding pair
+        result = {}
+        # Collect all property names present in any keyframe
+        all_props = set()
+        for kf in kfs:
+            all_props.update(kf.values.keys())
+        for prop in all_props:
+            # Find the keyframes on each side that define this property
+            lo_kf = hi_kf = None
+            for kf in kfs:
+                if prop in kf.values:
+                    if kf.t <= t_clip:
+                        lo_kf = kf
+                    elif kf.t > t_clip and hi_kf is None:
+                        hi_kf = kf
+            if lo_kf is None:
+                result[prop] = hi_kf.values[prop]
+            elif hi_kf is None:
+                result[prop] = lo_kf.values[prop]
+            else:
+                span = hi_kf.t - lo_kf.t
+                frac = (t_clip - lo_kf.t) / span if span > 1e-9 else 0.0
+                result[prop] = lo_kf.values[prop] + frac * (hi_kf.values[prop] - lo_kf.values[prop])
+        return result
+
+    def props_at(self, t_clip):
+        """Return a dict of all animatable properties at ``t_clip``, interpolated if keyframes exist,
+        falling back to static clip attributes otherwise."""
+        if not self.keyframes:
+            return {p: getattr(self, p) for p in KEYFRAMED_PROPS}
+        base = {p: getattr(self, p) for p in KEYFRAMED_PROPS}
+        base.update(self.interpolate(t_clip))
+        return base
+
+    # ── keyframe CRUD ───────────────────────────────────────────────────────
+    def set_keyframe(self, t_clip, **values):
+        """Add or update a keyframe at ``t_clip`` with the given property values. Keeps the list sorted."""
+        t_clip = float(t_clip)
+        kf = self.keyframe_at(t_clip)
+        if kf is not None:
+            kf.values.update({k: float(v) for k, v in values.items() if k in KEYFRAMED_PROPS})
+        else:
+            kf = Keyframe(t_clip, **values)
+            self.keyframes.append(kf)
+            self.keyframes.sort(key=lambda k: k.t)
+        return kf
+
+    def remove_keyframe(self, t_clip, tol=0.05):
+        """Remove the keyframe nearest to ``t_clip`` if within ``tol`` seconds."""
+        kf = self.keyframe_at(t_clip, tol)
+        if kf is not None:
+            self.keyframes.remove(kf)
+            return True
+        return False
+
+    def keyframe_at(self, t_clip, tol=0.05):
+        """Return the keyframe nearest to ``t_clip`` within ``tol`` seconds, or None."""
+        t_clip = float(t_clip)
+        best, best_d = None, tol
+        for kf in self.keyframes:
+            d = abs(kf.t - t_clip)
+            if d <= best_d:
+                best, best_d = kf, d
+        return best
+
+    def clear_keyframes(self):
+        """Remove all keyframes from this clip."""
+        self.keyframes.clear()
 
 
 class Project:
@@ -153,7 +272,7 @@ class Project:
     def top_video_clip_at(self, t):
         """Topmost visible video/image clip at time t (tracks listed first are on top)."""
         for i, tr in enumerate(self.tracks):
-            if tr["kind"] == "video":
+            if tr["kind"] == "video" and not tr.get("hidden"):
                 c = self.clip_at(i, t)
                 if c and c.title is None:             # titles are overlays, not the picture
                     return c
@@ -161,35 +280,97 @@ class Project:
 
     def titles_at(self, t):
         """Title clips visible at t, bottom-most first (so they can be painted in order)."""
-        found = [c for c in self.clips if c.title is not None and c.start <= t < c.end]
+        found = [c for c in self.clips if c.title is not None and c.start <= t < c.end and not self.track_hidden(c.track)]
         return sorted(found, key=lambda c: (-c.track, c.start))
 
-    def fit_box(self, c):
+    def fit_box(self, c, t_clip=None):
         """(centre x, centre y, width, height) of a picture clip on the frame, all as fractions of the frame."""
         m = self.media[c.media_id]
         mw, mh = (m.width, m.height) if m.width > 0 and m.height > 0 else (self.width, self.height)
         f = min(self.width / mw, self.height / mh)
-        return c.pos_x, c.pos_y, mw * f * c.scale / self.width, mh * f * c.scale / self.height
+        if t_clip is not None:
+            props = c.props_at(t_clip)
+            pos_x, pos_y, scale = props.get("pos_x", c.pos_x), props.get("pos_y", c.pos_y), props.get("scale", c.scale)
+        else:
+            pos_x, pos_y, scale = c.pos_x, c.pos_y, c.scale
+        return pos_x, pos_y, mw * f * scale / self.width, mh * f * scale / self.height
 
-    def video_clips_at(self, t):
-        """Every visible picture clip (video / image, not titles) at t, bottom layer first."""
+    def video_clips_at(self, t, include_hidden=False):
+        """Every visible picture clip (video / image, not titles) at t, bottom layer first.
+
+        Clips on a hidden layer are left out unless ``include_hidden`` (the preview needs them for sound)."""
         found = [c for c in self.clips if c.title is None and c.start <= t < c.end
                  and 0 <= c.track < len(self.tracks) and self.tracks[c.track]["kind"] == "video"
+                 and (include_hidden or not self.tracks[c.track].get("hidden"))
                  and self.media[c.media_id].kind in ("video", "image")]
         return sorted(found, key=lambda c: -c.track)
+
+    def visual_clips_at(self, t):
+        """Everything painted on the frame at t (pictures AND titles) in true stacking order, bottom first.
+
+        A layer further up the timeline is in front of the ones below it; inside one layer clips never overlap.
+        """
+        found = [c for c in self.clips if c.start <= t < c.end
+                 and 0 <= c.track < len(self.tracks) and self.tracks[c.track]["kind"] == "video"
+                 and not self.tracks[c.track].get("hidden")
+                 and self.media[c.media_id].kind in VISUAL_KINDS]
+        return sorted(found, key=lambda c: (-c.track, c.start))
 
     def library(self):
         """Media the user imported (excludes the hidden placeholder that titles use)."""
         return [m for m in self.media.values() if m.kind != TEXT_KIND]
 
     def audio_clip_at(self, t):
-        """Clip that supplies preview audio at t: first audio-track clip, else the top video clip."""
+        """Clip that supplies preview audio at t: first audible audio-track clip (muted tracks are skipped)."""
         for i, tr in enumerate(self.tracks):
-            if tr["kind"] == "audio":
+            if tr["kind"] == "audio" and not tr.get("muted"):
                 c = self.clip_at(i, t)
                 if c:
                     return c
         return None
+
+    # ── layer switches: hide / lock / mute ──
+    def _flag(self, track, key):
+        return bool(0 <= track < len(self.tracks) and self.tracks[track].get(key))
+
+    def track_hidden(self, track):
+        return self._flag(track, "hidden")
+
+    def track_locked(self, track):
+        return self._flag(track, "locked")
+
+    def track_muted(self, track):
+        return self._flag(track, "muted")
+
+    def clip_locked(self, clip_id):
+        """True if the clip sits on a locked layer (it then refuses every edit)."""
+        c = self.clip(clip_id)
+        return c is not None and self.track_locked(c.track)
+
+    def track_has_sound(self, track):
+        """True if the layer can carry sound at all (an audio track, or a video layer with a clip that has audio)."""
+        if not (0 <= track < len(self.tracks)):
+            return False
+        if self.tracks[track]["kind"] == "audio":
+            return True
+        return any(c.track == track and self.media[c.media_id].kind == "video" and self.media[c.media_id].has_audio
+                   for c in self.clips)
+
+    def set_track_flag(self, track, key, value):
+        """Turn a layer switch (``hidden`` / ``locked`` / ``muted``) on or off. True if anything changed."""
+        if key not in TRACK_FLAGS or not (0 <= track < len(self.tracks)):
+            return False
+        value = bool(value)
+        if bool(self.tracks[track].get(key)) == value:
+            return False
+        if value:
+            self.tracks[track][key] = True
+        else:
+            self.tracks[track].pop(key, None)            # keep old project files / snapshots tidy
+        return True
+
+    def toggle_track_flag(self, track, key):
+        return self.set_track_flag(track, key, not self._flag(track, key))
 
     def track_type(self, track):
         """"video" | "image" | "text" | "audio" for a typed layer, None for a legacy (untyped) one."""
@@ -197,15 +378,16 @@ class Project:
 
     def _group(self, track):
         """What a track may be swapped / grouped with: its type, or its kind for legacy projects."""
-        tr = self.tracks[track]
-        return tr.get("type") or tr["kind"]
+        return self.tracks[track]["kind"]
 
     def track_accepts(self, track, media_kind):
         if not (0 <= track < len(self.tracks)):
             return False
         ttype = self.tracks[track].get("type")
         if ttype:
-            return ttype == media_kind
+            if ttype == "audio":
+                return media_kind == "audio"
+            return media_kind in VISUAL_KINDS          # video, photo and text may share a picture layer
         kind = self.tracks[track]["kind"]
         return (kind == "audio") == (media_kind == "audio")
 
@@ -216,7 +398,7 @@ class Project:
             idx = [i for i in range(len(self.tracks)) if self.track_accepts(i, media_kind)]
             if not idx:
                 return None
-            return idx[-1] if media_kind == "video" else idx[0]
+            return idx[0] if media_kind in ("audio", TEXT_KIND) else idx[-1]     # text: top layer; pictures: bottom one
         want = "audio" if media_kind == "audio" else "video"
         idx = [i for i, t in enumerate(self.tracks) if t["kind"] == want]
         if not idx:
@@ -233,14 +415,14 @@ class Project:
     def renumber_tracks(self):
         """Name tracks V<n>..V1 (top to bottom) and A1..A<n>, so names always match the stacking order."""
         if self.typed:
-            counts = {}
-            for t in self.tracks:
-                counts[t["type"]] = counts.get(t["type"], 0) + 1
-            seen = {}
-            for t in self.tracks:
-                seen[t["type"]] = seen.get(t["type"], 0) + 1
-                label = TYPE_LABEL[t["type"]]
-                t["name"] = label if counts[t["type"]] == 1 else f"{label} {seen[t['type']]}"
+            # Picture layers are numbered in the order they were added: the bottom one is "Video" (or Layer 1
+            # once there are several), every later one is above it with the next number. Audio: top to bottom.
+            vis = [t for t in self.tracks if t["kind"] == "video"]
+            aud = [t for t in self.tracks if t["kind"] == "audio"]
+            for n, t in enumerate(reversed(vis), 1):
+                t["name"] = "Video" if len(vis) == 1 else f"Layer {n}"
+            for n, t in enumerate(aud, 1):
+                t["name"] = "Audio" if len(aud) == 1 else f"Audio {n}"
             return
         nv, na = self.video_track_count(), 0
         v = nv
@@ -258,10 +440,11 @@ class Project:
         Clips on tracks at or below ``index`` are shifted down one row so they stay on their own track.
         Returns the index the new track ended up at.
         """
-        if self.typed and kind in TYPE_RANK:                     # insert inside the band of its own type
-            lo = sum(1 for i in range(len(self.tracks)) if TYPE_RANK[self.tracks[i]["type"]] < TYPE_RANK[kind])
-            hi = lo + sum(1 for t in self.tracks if t["type"] == kind)
-            new = {"name": "", "kind": "audio" if kind == "audio" else "video", "type": kind}
+        if self.typed and (kind in TYPE_RANK or kind == "video"):          # inside the band of its own kind
+            audio = kind == "audio"
+            nv = self.video_track_count()
+            lo, hi = (nv, len(self.tracks)) if audio else (0, nv)
+            new = {"name": "", "kind": "audio" if audio else "video", "type": "audio" if audio else "video"}
         else:
             nv = self.video_track_count()
             lo, hi = (0, nv) if kind == "video" else (nv, len(self.tracks))
@@ -315,6 +498,25 @@ class Project:
         self.renumber_tracks()
         return True
 
+    def reorder_track(self, src, dst):
+        """Drag-and-drop reorder: take layer ``src`` out and put it at index ``dst`` (same kind only).
+
+        Every layer in between shifts by one and the clips follow their layers. Returns True if the order changed."""
+        n = len(self.tracks)
+        if not (0 <= src < n and 0 <= dst < n) or src == dst:
+            return False
+        lo, hi = min(src, dst), max(src, dst)
+        if any(self._group(i) != self._group(src) for i in range(lo, hi + 1)):
+            return False                                 # picture layers and audio tracks never mix
+        order = list(range(n))
+        order.insert(dst, order.pop(src))                # order[new index] = old index
+        new_of_old = {old: new for new, old in enumerate(order)}
+        for c in self.clips:
+            c.track = new_of_old.get(c.track, c.track)
+        self.tracks = [self.tracks[old] for old in order]
+        self.renumber_tracks()
+        return True
+
     def track_is_empty(self, index):
         return not any(c.track == index for c in self.clips)
 
@@ -330,14 +532,34 @@ class Project:
         return all(start + duration <= o.start + 1e-9 or start >= o.end - 1e-9
                    for o in self.track_clips(track, ignore))
 
-    def find_layer(self, kind, preferred, start, duration, ignore=None):
+    def covered_above(self, track, start, duration, ignore=None):
+        """True if some clip on a layer ABOVE ``track`` overlaps [start, start+duration) in time (so a clip put
+        on ``track`` would be hidden behind something that was added earlier)."""
+        return any(c.track < track and c.id != ignore and c.start < start + duration - 1e-9
+                   and c.end > start + 1e-9 for c in self.clips)
+
+    def find_layer(self, kind, preferred, start, duration, ignore=None, auto=False):
         """Track index of a layer that takes ``kind`` ("video" | "image" | "text" | "audio") and is free at
         [start, start+duration).
 
-        Tries ``preferred`` first, then the other fitting layers nearest-first. If none exists or every one is
-        occupied a new layer is created, so you can keep adding clips without limit.
+        ``auto`` means nobody picked a layer (import, double-click, Add Title...). In a typed (CapCut-style)
+        project the rule is then: use the lowest picture layer that is free AND not covered by an earlier
+        layer, else create a NEW layer on top. So whatever you add last is always in front. Dropping a clip
+        on a busy layer puts the new layer right above that one. Audio and legacy projects: nearest free layer,
+        else a new one, so you can keep adding clips without limit.
         """
-        idx = [i for i in range(len(self.tracks)) if self.track_accepts(i, kind)]
+        if self.typed and kind != "audio":
+            vis = [i for i in range(len(self.tracks)) if self.track_accepts(i, kind) and not self.track_locked(i)]
+            if auto:
+                order = vis[:1] if kind == TEXT_KIND else list(reversed(vis))     # titles only join the top layer
+                for i in order:
+                    if self.is_free(i, start, duration, ignore) and not self.covered_above(i, start, duration, ignore):
+                        return i
+                return self.insert_track(0, "video")
+            if preferred in vis and self.is_free(preferred, start, duration, ignore):
+                return preferred
+            return self.insert_track(preferred if preferred in vis else 0, "video")
+        idx = [i for i in range(len(self.tracks)) if self.track_accepts(i, kind) and not self.track_locked(i)]
         if preferred in idx:
             idx.sort(key=lambda i: (abs(i - preferred), i))
         elif kind != "audio":
@@ -405,8 +627,9 @@ class Project:
         if new is not None:
             track = new
         else:
-            pref = track if (track is not None and self.track_accepts(track, m.kind)) else self.first_track_for(m.kind)
-            track = self.find_layer(m.kind, pref, start, dur)
+            explicit = track is not None and self.track_accepts(track, m.kind)
+            pref = track if explicit else self.first_track_for(m.kind)
+            track = self.find_layer(m.kind, pref, start, dur, auto=not explicit)
         c = Clip(self._new_id("c"), media_id, track, start, in_point, dur)
         self.clips.append(c)
         return c
@@ -433,7 +656,7 @@ class Project:
             s = self.resolve_start(track, start, duration)
         elif self.typed:                                      # a free Text layer, created on demand
             s = max(0.0, start)
-            track = self.find_layer(TEXT_KIND, self.first_track_for(TEXT_KIND), s, duration)
+            track = self.find_layer(TEXT_KIND, self.first_track_for(TEXT_KIND), s, duration, auto=True)
         else:
             s = max(0.0, start)
             track = self.first_track_for(TEXT_KIND)
@@ -446,7 +669,7 @@ class Project:
     def set_title(self, clip_id, **style):
         """Update a title clip's style/text. Returns False if the clip isn't a title."""
         c = self.clip(clip_id)
-        if c is None or c.title is None:
+        if c is None or c.title is None or self.track_locked(c.track):
             return False
         c.title.update(style)
         return True
@@ -455,11 +678,17 @@ class Project:
     def split(self, clip_id, t):
         """Split a clip at timeline time t. Returns the new right-hand clip or None."""
         c = self.clip(clip_id)
-        if c is None or not (c.start + MIN_CLIP <= t <= c.end - MIN_CLIP):
+        if c is None or self.track_locked(c.track) or not (c.start + MIN_CLIP <= t <= c.end - MIN_CLIP):
             return None
+        split_local = t - c.start   # clip-local time of the split
         right = Clip(self._new_id("c"), c.media_id, c.track, t, c.in_point + (t - c.start), c.end - t,
                      title=None if c.title is None else dict(c.title),
                      **{k: getattr(c, k) for k in CLIP_DEFAULTS})
+        # Distribute keyframes: left keeps those before the cut, right gets those at/after (offset adjusted)
+        left_kfs = [kf for kf in c.keyframes if kf.t < split_local]
+        right_kfs = [Keyframe(kf.t - split_local, **kf.values) for kf in c.keyframes if kf.t >= split_local]
+        c.keyframes = left_kfs
+        right.keyframes = right_kfs
         c.duration = t - c.start
         self.clips.append(right)
         return right
@@ -484,6 +713,8 @@ class Project:
 
     def trim_left(self, clip_id, new_start):
         c = self.clip(clip_id)
+        if self.track_locked(c.track):
+            return
         lo, _ = self.trim_limits(clip_id)
         new_start = min(max(new_start, lo), c.end - MIN_CLIP)
         delta = new_start - c.start
@@ -493,6 +724,8 @@ class Project:
 
     def trim_right(self, clip_id, new_end):
         c = self.clip(clip_id)
+        if self.track_locked(c.track):
+            return
         _, hi = self.trim_limits(clip_id)
         new_end = max(min(new_end, hi), c.start + MIN_CLIP)
         c.duration = new_end - c.start
@@ -521,6 +754,8 @@ class Project:
         """
         c = self.clip(clip_id)
         m = self.media[c.media_id]
+        if self.track_locked(c.track):
+            return 0.0
         lo, hi = self.ripple_limits(clip_id, side)
         edge = min(max(edge, lo), hi)
         old_end = c.end
@@ -555,6 +790,8 @@ class Project:
         """Change which part of the source plays without moving the clip or changing its length.
         Returns True if the in-point changed."""
         c = self.clip(clip_id)
+        if self.track_locked(c.track):
+            return False
         lo, hi = self.slip_limits(clip_id)
         new = min(max(in_point, lo), hi)
         if abs(new - c.in_point) < 1e-9:
@@ -565,6 +802,10 @@ class Project:
     def move(self, clip_id, track, start):
         c = self.clip(clip_id)
         m = self.media[c.media_id]
+        if self.track_locked(c.track):
+            return                                       # a locked layer's clips stay exactly where they are
+        if track >= 0 and self.track_locked(track):
+            track = c.track                              # ...and nothing can be dropped onto a locked layer
         if track in (NEW_TOP, NEW_BOTTOM):
             kind = "audio" if m.kind == "audio" else "video"
             if (track == NEW_TOP) != (kind == "video"):
@@ -577,7 +818,7 @@ class Project:
         c.start = self.resolve_start(track, start, c.duration, ignore=clip_id)
 
     def delete(self, clip_ids, ripple=False):
-        ids = set(clip_ids)
+        ids = {i for i in clip_ids if not self.clip_locked(i)}      # locked layers keep their clips
         removed = [c for c in self.clips if c.id in ids]
         self.clips = [c for c in self.clips if c.id not in ids]
         if ripple:
