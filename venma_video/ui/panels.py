@@ -7,13 +7,14 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QListWidget, QListWidgetItem,
     QAbstractItemView, QComboBox, QSpinBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
     QFileDialog, QFrame, QGridLayout, QPlainTextEdit, QFontComboBox, QToolButton, QCheckBox,
-    QColorDialog, QScrollArea,
+    QColorDialog, QScrollArea, QMenu,
 )
 
 from . import theme
 from ..core import ffmpeg_tools as ft
 from ..core.project import PRESETS
 from .timeline import MIME_MEDIA, format_tc
+from .docks import CollapsibleSection
 
 TILE = QSize(104, 58)
 
@@ -53,7 +54,7 @@ class MediaList(QListWidget):
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
         self.setWordWrap(True)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)     # Ctrl/Shift-click or drag a box
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragOnly)
         self.setSpacing(4)
@@ -61,7 +62,8 @@ class MediaList(QListWidget):
     def mimeData(self, items):
         md = QMimeData()
         if items:
-            md.setData(MIME_MEDIA, QByteArray(items[0].data(Qt.UserRole).encode("utf-8")))
+            ids = "\n".join(it.data(Qt.UserRole) for it in sorted(items, key=self.row))
+            md.setData(MIME_MEDIA, QByteArray(ids.encode("utf-8")))
         return md
 
     def mimeTypes(self):
@@ -76,32 +78,71 @@ class MediaBin(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
-        row = QHBoxLayout()
-        self.b_import = QPushButton(" Import")
-        self.b_import.setIcon(theme.icon("import", 16))
-        self.b_import.clicked.connect(self.importRequested.emit)
-        self.b_add = QPushButton(" Add to timeline")
-        self.b_add.setObjectName("primary")
-        self.b_add.clicked.connect(self._add)
-        self.b_del = QPushButton()
-        self.b_del.setIcon(theme.icon("trash", 16))
-        self.b_del.setToolTip("Remove from project")
-        self.b_del.clicked.connect(self._remove)
-        for b in (self.b_import, self.b_add, self.b_del):
-            row.addWidget(b)
-        lay.addLayout(row)
-        self.list = MediaList()
-        self.list.itemDoubleClicked.connect(lambda it: self.addRequested.emit(it.data(Qt.UserRole)))
-        lay.addWidget(self.list, 1)
-        self.hint = QLabel("Import clips, then drag them onto the timeline\n(or double-click to append at the playhead).")
-        self.hint.setWordWrap(True)
-        self.hint.setStyleSheet(f"color: {theme.T['muted']}; font-size: 9pt;")
-        lay.addWidget(self.hint)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
 
+        self.b_import = QPushButton(" Import")
+        self.b_import.setObjectName("primary")
+        theme.set_icon(self.b_import, "import", 14, "on_accent")
+        self.b_import.setToolTip("Import media (Ctrl+I) - or just drag files onto the window")
+        self.b_import.clicked.connect(self.importRequested.emit)
+        lay.addWidget(self.b_import)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.search = QLineEdit()
+        self.search.setObjectName("search")
+        self.search.setPlaceholderText("Search media")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._filter)
+        self.b_view = QToolButton()
+        self.b_view.setCheckable(True)
+        self.b_view.setToolTip("Switch between thumbnails and list")
+        theme.set_icon(self.b_view, "list", 15)
+        self.b_view.toggled.connect(self._set_list_mode)
+        row.addWidget(self.search, 1)
+        row.addWidget(self.b_view)
+        lay.addLayout(row)
+
+        self.list = MediaList()
+        self.list.itemDoubleClicked.connect(lambda it: self.addRequested.emit(self._sel() or it.data(Qt.UserRole)))
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._menu)
+        lay.addWidget(self.list, 1)
+
+        self.empty = QFrame()                              # one calm empty state instead of text + hint
+        self.empty.setObjectName("dropzone")
+        el = QVBoxLayout(self.empty)
+        el.setContentsMargins(16, 28, 16, 28)
+        el.setSpacing(8)
+        ic = QLabel()
+        ic.setAlignment(Qt.AlignCenter)
+        theme.set_icon(ic, "import", 28)
+        t1 = QLabel("Drop media here")
+        t1.setAlignment(Qt.AlignCenter)
+        t1.setStyleSheet("font-weight: 600;")
+        t2 = QLabel("Video, audio or images. Drag them down to the timeline.")
+        t2.setObjectName("muted")
+        t2.setAlignment(Qt.AlignCenter)
+        t2.setWordWrap(True)
+        for w in (ic, t1, t2):
+            el.addWidget(w)
+        lay.addWidget(self.empty)
+        self._sync_empty()
+
+    def _menu(self, pos):
+        if not self._sel():
+            return
+        m = QMenu(self)
+        m.addAction("Add to timeline", self._add)
+        m.addAction("Remove from project", self._remove)
+        m.exec_(self.list.viewport().mapToGlobal(pos))
+
+    # -- selection helpers
     def _sel(self):
-        it = self.list.currentItem()
-        return it.data(Qt.UserRole) if it else None
+        """Selected media ids in bin order, joined by newlines (None if nothing is selected)."""
+        items = sorted(self.list.selectedItems(), key=self.list.row)
+        return "\n".join(it.data(Qt.UserRole) for it in items) or None
 
     def _add(self):
         if self._sel():
@@ -111,16 +152,47 @@ class MediaBin(QWidget):
         if self._sel():
             self.removeRequested.emit(self._sel())
 
+    # -- view modes / filter
+    def _set_list_mode(self, on):
+        L = self.list
+        if on:
+            L.setViewMode(QListWidget.ListMode)
+            L.setGridSize(QSize())
+            L.setIconSize(QSize(64, 36))
+            L.setSpacing(2)
+        else:
+            L.setViewMode(QListWidget.IconMode)
+            L.setIconSize(TILE)
+            L.setGridSize(QSize(TILE.width() + 22, TILE.height() + 44))
+            L.setSpacing(4)
+        L.setMovement(QListWidget.Static)
+        theme.set_icon(self.b_view, "grid" if on else "list", 15)
+        self.b_view.setToolTip("Show thumbnails" if on else "Show as list")
+
+    def _filter(self, text):
+        q = text.strip().lower()
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setHidden(bool(q) and q not in (it.data(Qt.UserRole + 1) or "").lower())
+
+    def _sync_empty(self):
+        none = self.list.count() == 0
+        self.empty.setVisible(none)
+        self.list.setVisible(not none)
+
+    # -- content
     def clear(self):
         self.list.clear()
 
     def add_item(self, media, pix=None):
-        it = QListWidgetItem(QIcon(pix or placeholder_tile(media.kind)), f"{media.name}\n{_fmt_dur(media.duration) if media.kind != 'image' else 'image'}")
+        it = QListWidgetItem(QIcon(pix or placeholder_tile(media.kind)),
+                             f"{media.name}\n{_fmt_dur(media.duration) if media.kind != 'image' else 'image'}")
         it.setData(Qt.UserRole, media.id)
+        it.setData(Qt.UserRole + 1, media.name)
         it.setToolTip(f"{media.path}\n{media.width}×{media.height}" if media.width else media.path)
         it.setTextAlignment(Qt.AlignHCenter)
         self.list.addItem(it)
-        self.hint.setVisible(self.list.count() == 0)
+        self._sync_empty()
 
     def set_thumb(self, media_id, pix):
         for i in range(self.list.count()):
@@ -133,7 +205,8 @@ class MediaBin(QWidget):
         for m in project.library():
             th = thumbs.get(m.id)
             self.add_item(m, fit_tile(th) if th is not None else None)
-        self.hint.setVisible(self.list.count() == 0)
+        self._filter(self.search.text())
+        self._sync_empty()
 
 
 # ── Clip properties ──────────────────────────────────────────────────────────
@@ -207,7 +280,11 @@ class PropertiesPanel(QWidget):
         ("brightness", "Brightness", -100, 100, 0, 100.0),
         ("contrast", "Contrast", 0, 200, 100, 100.0),
         ("saturation", "Saturation", 0, 300, 100, 100.0),
+        ("scale", "Scale", 5, 400, 100, 100.0),
+        ("pos_x", "Position X", -50, 150, 50, 100.0),
+        ("pos_y", "Position Y", -50, 150, 50, 100.0),
     ]
+    XFORM = ("scale", "pos_x", "pos_y")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -220,31 +297,40 @@ class PropertiesPanel(QWidget):
         scroll.setWidget(inner)
         outer.addWidget(scroll)
         lay = QVBoxLayout(inner)
-        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setContentsMargins(14, 10, 14, 12)
+        lay.setSpacing(8)
         self._loading = False
         self.title = QLabel("No clip selected")
-        self.title.setStyleSheet(f"font-family: {theme.SERIF}; font-size: 13pt;")
+        self.title.setStyleSheet("font-size: 11pt; font-weight: 600;")
         self.title.setWordWrap(True)
         self.info = QLabel("")
         self.info.setStyleSheet(f"color: {theme.T['muted']}; font-size: 9pt;")
         self.info.setWordWrap(True)
         lay.addWidget(self.title)
         lay.addWidget(self.info)
-        line = QFrame(); line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet(f"color: {theme.T['border']};")
-        lay.addWidget(line)
         self._build_text_section(lay)
         self.rows = {}
+        self.sec_audio = CollapsibleSection("Audio")
+        self.sec_visual = CollapsibleSection("Opacity & colour")
+        self.sec_xform = CollapsibleSection("Position & size")
         for attr, label, lo, hi, default, scale in self.SPEC:
             r = _SliderRow(label, lo, hi, default)
             r.changed.connect(lambda v, a=attr, s=scale: self.propertyEdited.emit(a, v / s))
             self.rows[attr] = (r, scale)
-            lay.addWidget(r)
-        self.b_reset = QPushButton("Reset effects")
+            (self.sec_audio if attr == "volume" else self.sec_xform if attr in self.XFORM else self.sec_visual).add(r)
+        lay.addWidget(self.sec_audio)
+        lay.addWidget(self.sec_xform)
+        lay.addWidget(self.sec_visual)
+        self.b_reset = QPushButton(" Reset effects")
+        theme.set_icon(self.b_reset, "reset", 13)
         self.b_reset.clicked.connect(self.resetRequested.emit)
         lay.addWidget(self.b_reset)
         lay.addStretch(1)
         self.set_clip(None, None, 30)
+
+    def retint(self):
+        for sec in (self.text_box, self.sec_audio, self.sec_xform, self.sec_visual):
+            sec.retint()
 
     # ── title (text) controls ────────────────────────────────────────────────
     def _emit_title(self, key, value):
@@ -252,13 +338,8 @@ class PropertiesPanel(QWidget):
             self.titleEdited.emit(key, value)
 
     def _build_text_section(self, lay):
-        self.text_box = QWidget()
-        v = QVBoxLayout(self.text_box)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(8)
-        head = QLabel("Text")
-        head.setStyleSheet("font-weight: 600;")
-        v.addWidget(head)
+        self.text_box = CollapsibleSection("Text")
+        v = self.text_box.body_lay
 
         self.t_text = QPlainTextEdit()
         self.t_text.setPlaceholderText("Type your title…")
@@ -273,11 +354,11 @@ class PropertiesPanel(QWidget):
         row = QHBoxLayout()
         self.t_size = QSpinBox(); self.t_size.setRange(8, 600); self.t_size.setSuffix(" px")
         self.t_size.valueChanged.connect(lambda n: self._emit_title("size", n))
-        self.t_bold = QToolButton(); self.t_bold.setText("B"); self.t_bold.setCheckable(True)
-        self.t_bold.setStyleSheet("font-weight: 800;")
+        self.t_bold = QToolButton(); self.t_bold.setCheckable(True); self.t_bold.setToolTip("Bold")
+        theme.set_icon(self.t_bold, "bold", 13)
         self.t_bold.toggled.connect(lambda on: self._emit_title("bold", on))
-        self.t_italic = QToolButton(); self.t_italic.setText("I"); self.t_italic.setCheckable(True)
-        self.t_italic.setStyleSheet("font-style: italic;")
+        self.t_italic = QToolButton(); self.t_italic.setCheckable(True); self.t_italic.setToolTip("Italic")
+        theme.set_icon(self.t_italic, "italic", 13)
         self.t_italic.toggled.connect(lambda on: self._emit_title("italic", on))
         self.t_align = QComboBox()
         for label, key in (("Left", "left"), ("Center", "center"), ("Right", "right")):
@@ -317,9 +398,6 @@ class PropertiesPanel(QWidget):
         self.t_y.changed.connect(lambda n: self._emit_title("pos_y", n / 100.0))
         for w in (self.t_box_opacity, self.t_x, self.t_y):
             v.addWidget(w)
-        line = QFrame(); line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet(f"color: {theme.T['border']};")
-        v.addWidget(line)
         lay.addWidget(self.text_box)
 
     def _load_title(self, t):
@@ -348,9 +426,11 @@ class PropertiesPanel(QWidget):
         on = clip is not None
         is_title = on and clip.title is not None
         self.text_box.setVisible(is_title)
+        self.sec_audio.setVisible(not is_title)
+        self.sec_xform.setVisible(on and not is_title and media is not None and media.kind in ("video", "image"))
         for attr, (r, scale) in self.rows.items():
             r.setEnabled(on)
-            r.setVisible(not is_title or attr == "opacity")     # titles only have opacity
+            r.setVisible(not is_title or attr == "opacity")     # titles only have opacity (their X / Y are in Text)
             if on:
                 r.set_value(getattr(clip, attr) * scale)
         self.b_reset.setEnabled(on)
@@ -367,34 +447,34 @@ class PropertiesPanel(QWidget):
         self.info.setText(f"Start  {format_tc(clip.start, fps)}\nLength  {format_tc(clip.duration, fps)}\n"
                           f"Source in  {format_tc(clip.in_point, fps)}")
         has_video = media.kind in ("video", "image")
-        for attr in ("opacity", "brightness", "contrast", "saturation"):
+        for attr in ("opacity", "brightness", "contrast", "saturation") + self.XFORM:
             self.rows[attr][0].setEnabled(has_video)
         self.rows["volume"][0].setEnabled(media.kind == "audio" or media.has_audio)
 
 
-class HistoryPanel(QWidget):
-    jumpRequested = pyqtSignal(int)
+class TextPanel(QWidget):
+    """The Text tab: click a style to add it at the playhead."""
+    addRequested = pyqtSignal(str)        # preset name understood by MainWindow.add_title
 
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
-        self.list = QListWidget()
-        self.list.currentRowChanged.connect(self._row)
-        lay.addWidget(self.list)
-        self._block = False
-
-    def _row(self, r):
-        if not self._block and r >= 0:
-            self.jumpRequested.emit(r)
-
-    def set_states(self, labels, index):
-        self._block = True
-        self.list.clear()
-        for i, l in enumerate(labels):
-            self.list.addItem(f"{i}. {l}")
-        self.list.setCurrentRow(index)
-        self._block = False
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+        note = QLabel("Click a style to add it at the playhead.")
+        note.setObjectName("muted")
+        lay.addWidget(note)
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        for i, (label, preset) in enumerate((("Title", "Title"), ("Lower third", "Lower third"),
+                                             ("Subtitle", "Subtitle"))):
+            b = QPushButton(label)
+            b.setObjectName("card")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, p=preset: self.addRequested.emit(p))
+            grid.addWidget(b, i // 2, i % 2)
+        lay.addLayout(grid)
+        lay.addStretch(1)
 
 
 # ── Dialogs ──────────────────────────────────────────────────────────────────

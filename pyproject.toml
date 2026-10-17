@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A PyQt5 video editor with the Venma design language, powered by FFmpeg."
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["PyQt5>=5.15"]
+dependencies = ["PyQt5>=5.15", "qtawesome>=1.2"]
 
 [project.optional-dependencies]
 icons = ["qtawesome"]

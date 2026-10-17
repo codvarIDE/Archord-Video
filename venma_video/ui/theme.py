@@ -1,27 +1,28 @@
-"""Venma Video design system (shared look with Venma): warm paper tones, charcoal accent, serif headings, line icons.
+"""Venma Video design system (shared look with Venma): warm paper tones, magenta accent, serif headings, line icons.
 
 One place for every colour token, the global Qt stylesheet, and the icon set.
 """
 import os
+import weakref
 from PyQt5.QtCore import Qt, QByteArray, QSettings, QRectF
 from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QPalette, QFont, QFontDatabase
 from PyQt5.QtSvg import QSvgRenderer
 
 LIGHT = dict(
-    bg="#FAF9F5", surface="#FFFFFF", panel="#F5F4ED", sunken="#EFEDE4",
-    border="#E6E3D8", border_strong="#D3CFC0", text="#141413", muted="#73726C",
-    faint="#A8A69C", accent="#3B3A37", accent_hover="#262523", accent_soft="#E1DFD5",
-    on_accent="#FFFFFF", canvas="#EDEBE2", checker1="#E3E0D5", checker2="#F2F0E8",
+    bg="#F3F4F6", surface="#FFFFFF", panel="#FFFFFF", sunken="#E9EBEF",
+    border="#E1E4E9", border_strong="#CBD0D8", text="#16181D", muted="#6B7280",
+    faint="#A3A9B4", accent="#D1169E", accent_hover="#A80F7D", accent_soft="#FADCF0",
+    on_accent="#FFFFFF", canvas="#E4E6EB", checker1="#DDE0E6", checker2="#EEF0F3",
 )
 DARK = dict(
-    bg="#1F1E1D", surface="#2B2A28", panel="#262524", sunken="#1A1918",
-    border="#3A3835", border_strong="#4B4944", text="#F0EEE6", muted="#A3A198",
-    faint="#6F6D66", accent="#D8D5CB", accent_hover="#EFECE3", accent_soft="#3A3835",
-    on_accent="#1F1E1D", canvas="#161615", checker1="#242321", checker2="#2D2C2A",
+    bg="#0E0E10", surface="#1C1C20", panel="#161619", sunken="#111113",
+    border="#26262B", border_strong="#34343A", text="#F4F4F5", muted="#9A9AA3",
+    faint="#62626B", accent="#E83DBE", accent_hover="#F26CD2", accent_soft="#3A1532",
+    on_accent="#FFFFFF", canvas="#08080A", checker1="#1B1B1F", checker2="#232327",
 )
-T = dict(LIGHT)          # live tokens (mutated by set_theme)
-NAME = "light"
-SERIF = '"Tiempos Headline", "Iowan Old Style", "Palatino Linotype", Georgia, serif'
+T = dict(DARK)           # live tokens (mutated by set_theme)
+NAME = "dark"
+SERIF = '"Inter", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif'
 MONO = '"JetBrains Mono", "SF Mono", Menlo, Consolas, monospace'
 
 # ---- icons (24px line icons, Lucide-style) ---------------------------------
@@ -30,11 +31,6 @@ _P = {
  "save": '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
  "undo": '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
  "redo": '<path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"/>',
- "rot_l": '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
- "rot_r": '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
- "flip_h": '<path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3"/><path d="M12 20v2M12 14v2M12 8v2M12 2v2"/>',
- "flip_v": '<path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3"/><path d="M4 12H2M10 12H8M16 12h-2M22 12h-2"/>',
- "crop": '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
  "check": '<path d="M20 6 9 17l-5-5"/>',
  "zoom": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
  "zoom_in": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/>',
@@ -59,20 +55,12 @@ _P = {
  "magnet": '<path d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15"/><path d="m5 8 4 4"/><path d="m12 15 4 4"/>',
  "plus": '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
  "move": '<polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/>',
- "marquee": '<rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="3 3"/>',
- "brush": '<path d="m9 12 8-8a2.8 2.8 0 1 1 4 4l-8 8"/><path d="M7 15c-1.7 0-3 1.3-3 3 0 1.3-2.5 1.5-2 2 1.1 1.1 2.5 2 4 2 2.2 0 4-1.8 4-4a3 3 0 0 0-3-3z"/>',
- "eraser": '<path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/>',
- "bucket": '<path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2c.8.8 2 .8 2.8 0L19 11Z"/><path d="m5 2 5 5"/><path d="M2 13h15"/><path d="M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4Z"/>',
- "pipette": '<path d="m2 22 1-1h3l9-9"/><path d="M19 8a2.8 2.8 0 0 0 0-4l-1-1a2.8 2.8 0 0 0-4 0l-2 2 5 5 2-2Z"/><path d="m5 18-3 3"/>',
- "shape": '<path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/>',
- "pen": '<path d="m12 19 7-7 3 3-7 7-3-3z"/><path d="m18 13-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="m2 2 7.586 7.586"/><circle cx="11" cy="11" r="2"/>',
  "text": '<polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>',
  "hand": '<path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
  "layers": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
  "layer_plus": '<path d="m12 2-10 5 10 5 10-5-10-5Z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>',
  "trash": '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
  "duplicate": '<rect width="13" height="13" x="9" y="9" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
- "layer_merge": '<path d="M12 3v12"/><polyline points="8 11 12 15 16 11"/><path d="M4 21h16"/>',
  "eye": '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
  "eye_off": '<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/>',
  "lock": '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
@@ -81,15 +69,8 @@ _P = {
  "swap": '<path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/>',
  "sliders": '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
  "history": '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
- "filter": '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
- "chart": '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
- "tools": '<path d="m14 7 3-3a2.8 2.8 0 1 1 4 4l-3 3"/><path d="m2 22 7-7"/><path d="M5 19 2 22"/><path d="m19 15 2 2-7 7-2-2Z"/>',
- "chevrons_right": '<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>',
- "chevrons_left": '<polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/>',
  "ripple": '<path d="M8 4v16"/><path d="M8 12h6"/><polyline points="11.5 9.5 14 12 11.5 14.5"/><rect x="17" y="7" width="4" height="10" rx="1"/>',
  "slip": '<rect x="3" y="6" width="18" height="12" rx="2"/><line x1="7" y1="12" x2="17" y2="12"/><polyline points="10 9.5 7.5 12 10 14.5"/><polyline points="14 9.5 16.5 12 14 14.5"/>',
- "split": '<rect width="18" height="18" x="3" y="3" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/>',
- "transform": '<rect x="5" y="5" width="14" height="14" stroke-dasharray="3 2"/><rect x="2.5" y="2.5" width="3" height="3"/><rect x="10.5" y="2.5" width="3" height="3"/><rect x="18.5" y="2.5" width="3" height="3"/><rect x="2.5" y="10.5" width="3" height="3"/><rect x="18.5" y="10.5" width="3" height="3"/><rect x="2.5" y="18.5" width="3" height="3"/><rect x="10.5" y="18.5" width="3" height="3"/><rect x="18.5" y="18.5" width="3" height="3"/>',
 }
 
 
@@ -98,7 +79,7 @@ def _svg(name, color, sw=1.75):
             f'stroke-width="{sw}" stroke-linecap="round" stroke-linejoin="round">{_P[name]}</svg>').encode()
 
 
-def pixmap(name, color, size=20, sw=1.75):
+def _svg_pixmap(name, color, size=20, sw=1.75):
     s = size * 2
     pm = QPixmap(s, s); pm.fill(Qt.transparent)
     p = QPainter(pm)
@@ -119,7 +100,7 @@ def get_app_icon_path():
 
 
 def app_icon():
-    """Window/taskbar icon: uses assets/venma.ico if present, otherwise generated charcoal rounded tile."""
+    """Window/taskbar icon: uses assets/venma.ico if present, otherwise generated magenta rounded tile."""
     ico_path = get_app_icon_path()
     if ico_path:
         return QIcon(ico_path)
@@ -143,32 +124,143 @@ def app_pixmap(size=64):
     return ico.pixmap(size, size)
 
 
+
 try:
     import qtawesome as qta
-except Exception:          # optional: only used for a few legacy icon names
+except Exception:          # optional: without it every icon falls back to the built-in SVG line set
     qta = None
+
+# ---- semantic icon names -> (QtAwesome glyph, built-in SVG fallback) --------------------------------------
+# Font Awesome 5 solid ("fa5s") is bundled with qtawesome. A glyph that a given qtawesome version does not
+# know simply falls back to the SVG, so a typo can never crash the app.
+_ICONS = {
+    # file
+    "new": ("fa5s.file", "open"), "open": ("fa5s.folder-open", "open"), "save": ("fa5s.save", "save"),
+    "saveas": ("fa5s.file-signature", "save"), "import": ("fa5s.file-import", "import"),
+    "export": ("fa5s.file-export", "export"), "settings": ("fa5s.cog", "sliders"), "quit": ("fa5s.power-off", None),
+    # edit
+    "undo": ("fa5s.undo-alt", "undo"), "redo": ("fa5s.redo-alt", "redo"), "split": ("fa5s.cut", "razor"),
+    "razor": ("fa5s.cut", "razor"), "trash": ("fa5s.trash-alt", "trash"), "ripple_delete": ("fa5s.backspace", "trash"),
+    "duplicate": ("fa5s.clone", "duplicate"), "reset": ("fa5s.sync-alt", "undo"), "check": ("fa5s.check", "check"),
+    # insert
+    "text": ("fa5s.font", "text"), "title": ("fa5s.heading", "text"), "lower_third": ("fa5s.tag", "text"),
+    "subtitle": ("fa5s.closed-captioning", "text"), "layer_plus": ("fa5s.plus-square", "layer_plus"),
+    "audio_plus": ("fa5s.music", "music"), "prune": ("fa5s.broom", "trash"), "plus": ("fa5s.plus", "plus"),
+    # transport
+    "play": ("fa5s.play", "play"), "pause": ("fa5s.pause", "pause"),
+    "skip_back": ("fa5s.fast-backward", "skip_back"), "skip_fwd": ("fa5s.fast-forward", "skip_fwd"),
+    "step_back": ("fa5s.step-backward", "step_back"), "step_fwd": ("fa5s.step-forward", "step_fwd"),
+    # view
+    "zoom_in": ("fa5s.search-plus", "zoom_in"), "zoom_out": ("fa5s.search-minus", "zoom_out"),
+    "fit": ("fa5s.expand-arrows-alt", "fit"), "magnet": ("fa5s.magnet", "magnet"),
+    "moon": ("fa5s.moon", "moon"), "sun": ("fa5s.sun", "sun"),
+    # tools
+    "move": ("fa5s.mouse-pointer", "move"), "ripple": ("fa5s.angle-double-right", "ripple"),
+    "slip": ("fa5s.arrows-alt-h", "slip"), "hand": ("fa5s.hand-paper", "hand"), "zoom": ("fa5s.search", "zoom"),
+    # media / layers
+    "film": ("fa5s.film", "film"), "music": ("fa5s.music", "music"), "image": ("fa5s.image", "image"),
+    "layers": ("fa5s.layer-group", "layers"), "eye": ("fa5s.eye", "eye"), "eye_off": ("fa5s.eye-slash", "eye_off"),
+    "lock": ("fa5s.lock", "lock"), "volume": ("fa5s.volume-up", "volume"), "arrow_up": ("fa5s.arrow-up", "arrow_up"),
+    "arrow_down": ("fa5s.arrow-down", "arrow_down"),
+    # panels & UI chrome
+    "panel_media": ("fa5s.photo-video", "film"), "panel_props": ("fa5s.sliders-h", "sliders"),
+    "panel_history": ("fa5s.history", "history"), "panel_timeline": ("fa5s.stream", "layers"),
+    "sliders": ("fa5s.sliders-h", "sliders"), "history": ("fa5s.history", "history"),
+    "panels": ("fa5s.th-large", "layers"), "workspace": ("fa5s.columns", "layers"),
+    "float": ("fa5s.window-restore", "swap"), "close": ("fa5s.times", "plus"), "search": ("fa5s.search", "zoom"),
+    "grid": ("fa5s.th", "layers"), "list": ("fa5s.list", "layers"), "chevron_right": ("fa5s.chevron-right", "step_fwd"),
+    "chevron_down": ("fa5s.chevron-down", "arrow_down"), "palette": ("fa5s.palette", None),
+    "adjust": ("fa5s.adjust", None), "bold": ("fa5s.bold", None), "italic": ("fa5s.italic", None),
+    "align_left": ("fa5s.align-left", None), "align_center": ("fa5s.align-center", None),
+    "align_right": ("fa5s.align-right", None), "keyboard": ("fa5s.keyboard", None), "info": ("fa5s.info-circle", None),
+    "spark": ("fa5s.video", "spark"),
+}
+
+
+def _qta_icon(glyph, color, **extra):
+    """A qtawesome icon, or None when qtawesome / that glyph is unavailable."""
+    if qta is None or not glyph:
+        return None
+    try:
+        return qta.icon(glyph, color=color, **extra)
+    except Exception:
+        return None
+
+
+def pixmap(name, color, size=20, sw=1.75):
+    """A device-pixel-ratio-aware pixmap of icon ``name`` in ``color`` (used by painted widgets)."""
+    glyph, fallback = _ICONS.get(name, (None, name))
+    ic = _qta_icon(glyph, color)
+    if ic is not None:
+        pm = ic.pixmap(size * 2, size * 2)
+        pm.setDevicePixelRatio(2)
+        return pm
+    if fallback in _P:
+        return _svg_pixmap(fallback, color, size, sw)
+    pm = QPixmap(size * 2, size * 2); pm.fill(Qt.transparent)
+    pm.setDevicePixelRatio(2)
+    return pm
 
 
 def qta_icon(name, color=None, color_active=None, color_disabled=None):
-    """Optional QtAwesome icon styled to the theme tokens (empty icon if qtawesome isn't installed)."""
-    if qta is None:
-        return QIcon()
-    c = color or T["text"]
-    ac = color_active or T["accent"]
-    dc = color_disabled or T["faint"]
-    return qta.icon(name, color=c, color_active=ac, color_selected=ac, color_disabled=dc)
+    """Raw QtAwesome icon (``"fa5s.play"`` style names) styled to the theme tokens."""
+    ic = _qta_icon(name, color or T["text"], color_active=color_active or T["accent"],
+                   color_selected=color_active or T["accent"], color_disabled=color_disabled or T["faint"])
+    return ic if ic is not None else QIcon()
 
 
-def icon(name, size=20):
+def icon(name, size=20, color=None):
+    """Themed QIcon for a semantic name (``"play"``) or a raw qtawesome name (``"fa5s.play"``).
+    Normal = text colour, hover/checked = accent, disabled = faint. ``color`` pins one colour for every state."""
     if "." in name:
-        return qta_icon(name)
-    if name in _P:
-        ic = QIcon()
-        ic.addPixmap(pixmap(name, T["text"], size), QIcon.Normal, QIcon.Off)
-        ic.addPixmap(pixmap(name, T["accent"], size), QIcon.Normal, QIcon.On)
-        ic.addPixmap(pixmap(name, T["faint"], size), QIcon.Disabled, QIcon.Off)
+        return qta_icon(name, color)
+    glyph, fallback = _ICONS.get(name, (None, name))
+    base = color or T["text"]
+    on = color or T["accent"]
+    ic = _qta_icon(glyph, base, color_on=on, color_active=on, color_selected=on, color_disabled=T["faint"])
+    if ic is not None:
         return ic
-    return qta_icon(name)
+    if fallback in _P:
+        out = QIcon()
+        out.addPixmap(_svg_pixmap(fallback, base, size), QIcon.Normal, QIcon.Off)
+        out.addPixmap(_svg_pixmap(fallback, on, size), QIcon.Normal, QIcon.On)
+        out.addPixmap(_svg_pixmap(fallback, T["faint"], size), QIcon.Disabled, QIcon.Off)
+        return out
+    return QIcon()
+
+
+# ---- live icon binding: every icon re-tints itself when the theme flips ------------------------------------
+_BOUND = []          # [(weakref, name, size, colour-token or None)]
+
+
+def set_icon(obj, name, size=20, color_token=None):
+    """Set an icon on an action / button / label and remember it so ``refresh_icons`` can re-tint it."""
+    _apply(obj, name, size, color_token)
+    _BOUND[:] = [e for e in _BOUND if e[0]() is not obj]      # one binding per object (re-binding replaces it)
+    _BOUND.append((weakref.ref(obj), name, size, color_token))
+    return obj
+
+
+def _apply(obj, name, size, color_token):
+    col = T[color_token] if color_token else None
+    if hasattr(obj, "setIcon"):
+        obj.setIcon(icon(name, size, col))
+    elif hasattr(obj, "setPixmap"):                           # QLabel: a static pixmap
+        obj.setPixmap(pixmap(name, col or T["muted"], size))
+
+
+def refresh_icons():
+    alive = []
+    for ref, name, size, tok in _BOUND:
+        o = ref()
+        if o is None:
+            continue
+        try:
+            _apply(o, name, size, tok)
+        except RuntimeError:                                  # underlying C++ object already deleted
+            continue
+        alive.append((ref, name, size, tok))
+    _BOUND[:] = alive
 
 
 # ---- global stylesheet -----------------------------------------------------
@@ -177,202 +269,122 @@ def qss(t):
 * {{ outline: 0; }}
 QMainWindow, QDialog, QMessageBox {{ background: {t['bg']}; }}
 QWidget {{ color: {t['text']}; }}
-QToolTip {{ background: #141413; color: #FAF9F5; border: none; padding: 5px 9px; border-radius: 6px; }}
+QToolTip {{ background: #26262B; color: #F4F4F5; border: 1px solid #34343A; padding: 5px 9px; border-radius: 6px; }}
 
-QMenuBar {{ background: {t['bg']}; padding: 4px 8px 0 8px; }}
-QMenuBar::item {{ padding: 5px 10px; border-radius: 6px; background: transparent; }}
-QMenuBar::item:selected {{ background: {t['sunken']}; }}
-QMenu {{ background: {t['surface']}; border: 1px solid {t['border_strong']}; border-radius: 8px; padding: 6px; }}
-QMenu::item {{ padding: 6px 28px 6px 12px; border-radius: 6px; }}
+/* menus (the single "Menu" button) */
+QMenu {{ background: {t['surface']}; border: 1px solid {t['border_strong']}; border-radius: 10px; padding: 6px; }}
+QMenu::item {{ padding: 7px 30px 7px 12px; border-radius: 6px; }}
 QMenu::item:selected {{ background: {t['accent_soft']}; color: {t['text']}; }}
 QMenu::item:disabled {{ color: {t['faint']}; }}
 QMenu::separator {{ height: 1px; background: {t['border']}; margin: 5px 8px; }}
 
-QToolBar {{ background: {t['bg']}; border: none; border-bottom: 1px solid {t['border']}; spacing: 2px; padding: 8px 14px; }}
-QToolBar::separator {{ width: 1px; background: {t['border']}; margin: 6px 8px; }}
-QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 9px; padding: 6px; }}
-QToolButton:hover {{ background: {t['sunken']}; }}
-QToolButton:pressed {{ background: {t['border']}; }}
-QToolButton:checked {{ background: {t['accent_soft']}; border-color: {t['accent']}; }}
-QToolButton:disabled {{ background: transparent; }}
-QWidget#brand {{ background: transparent; }}
-QLabel#brandName {{ font-family: {SERIF}; font-size: 16pt; font-weight: 600; letter-spacing: 0.3px; }}
+/* top bar */
+QFrame#topBar {{ background: {t['bg']}; border-bottom: 1px solid {t['border']}; }}
+QLabel#brandName {{ font-size: 12pt; font-weight: 700; letter-spacing: 0.2px; }}
+QLabel#projectName {{ color: {t['muted']}; font-size: 9.5pt; font-weight: 500; }}
+QToolButton#menuBtn {{ background: transparent; border: none; border-radius: 8px; padding: 6px 10px; font-weight: 500; }}
+QToolButton#menuBtn:hover {{ background: {t['surface']}; }}
+QToolButton#menuBtn::menu-indicator {{ image: none; width: 0; }}
 
-QStatusBar {{ background: {t['bg']}; color: {t['muted']}; border-top: 1px solid {t['border']}; padding: 2px 10px; }}
+QStatusBar {{ background: {t['bg']}; color: {t['muted']}; border-top: 1px solid {t['border']}; padding: 0 10px; font-size: 8.5pt; }}
 QStatusBar::item {{ border: none; }}
-QLabel#statusInfo {{ color: {t['muted']}; font-family: {MONO}; font-size: 9pt; padding: 3px 10px;
-                    background: {t['sunken']}; border-radius: 10px; }}
 
-QDockWidget {{ color: {t['text']}; font-family: {SERIF}; font-size: 12pt; }}
-QDockWidget::title {{ background: {t['bg']}; padding: 12px 16px 6px 16px; border: none; text-align: left; }}
-QDockWidget > QWidget {{ background: {t['bg']}; }}
-QMainWindow::separator {{ background: {t['border']}; width: 1px; height: 1px; }}
-QScrollArea {{ background: transparent; border: none; }}
-QScrollArea#stage, QWidget#stageVp {{ background: {t['canvas']}; }}
-QWidget#panel {{ background: {t['bg']}; }}
-
-QGroupBox {{ background: {t['surface']}; border: 1px solid {t['border']}; border-radius: 14px;
-            margin-top: 24px; padding: 14px 12px 12px 12px; font-size: 9.5pt; }}
-QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 4px; top: 2px;
-                   color: {t['muted']}; font-weight: 600; }}
-QLabel {{ background: transparent; }}
-QGroupBox QLabel {{ font-size: 9.5pt; }}
-QLabel#val {{ color: {t['muted']}; font-family: {MONO}; font-size: 9pt; }}
-
-QPushButton {{ background: {t['surface']}; border: 1px solid {t['border_strong']}; border-radius: 9px;
+/* generic buttons */
+QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 5px; }}
+QToolButton:hover {{ background: {t['surface']}; }}
+QToolButton:pressed {{ background: {t['border']}; }}
+QToolButton:checked {{ background: {t['accent_soft']}; color: {t['accent']}; }}
+QToolButton:disabled {{ background: transparent; }}
+QPushButton {{ background: {t['surface']}; border: 1px solid {t['border_strong']}; border-radius: 8px;
               padding: 7px 14px; font-weight: 500; }}
-QPushButton:hover {{ background: {t['sunken']}; }}
-QPushButton:pressed {{ background: {t['border']}; }}
+QPushButton:hover {{ background: {t['border']}; }}
+QPushButton:pressed {{ background: {t['border_strong']}; }}
 QPushButton:disabled {{ color: {t['faint']}; border-color: {t['border']}; }}
-QPushButton#primary {{ background: {t['accent']}; border: 1px solid {t['accent']}; color: {t['on_accent']}; font-weight: 600; }}
+QPushButton#primary {{ background: {t['accent']}; border: 1px solid {t['accent']}; color: {t['on_accent']}; font-weight: 700; }}
 QPushButton#primary:hover {{ background: {t['accent_hover']}; border-color: {t['accent_hover']}; }}
 QPushButton#primary:disabled {{ background: {t['sunken']}; border-color: {t['border']}; color: {t['faint']}; }}
-QPushButton#chip {{ background: {t['panel']}; border: 1px solid {t['border']}; border-radius: 14px;
-                   padding: 5px 8px; font-size: 9pt; font-weight: 500; }}
-QPushButton#chip:hover {{ background: {t['accent_soft']}; border-color: {t['accent']}; }}
-QPushButton#chip:disabled {{ background: transparent; }}
 
+/* panels */
+QWidget#panel, QFrame#panel {{ background: {t['panel']}; }}
+QFrame#panelFrame {{ background: {t['panel']}; border: 1px solid {t['border']}; border-radius: 0; }}
+QLabel#panelTitle {{ font-size: 9pt; font-weight: 600; color: {t['muted']}; }}
+QFrame#panelHead {{ background: transparent; border: none; border-bottom: 1px solid {t['border']}; }}
+QSplitter::handle {{ background: {t['bg']}; }}
+QSplitter::handle:horizontal {{ width: 6px; }}
+QSplitter::handle:vertical {{ height: 6px; }}
+QSplitter::handle:hover {{ background: {t['accent_soft']}; }}
+
+/* media / text category tabs (big icon over label, CapCut style) */
+QToolButton#catTab {{ background: transparent; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+    padding: 9px 4px 7px 4px; color: {t['muted']}; font-size: 8.5pt; font-weight: 600; }}
+QToolButton#catTab:hover {{ color: {t['text']}; background: transparent; }}
+QToolButton#catTab:checked {{ color: {t['text']}; border-bottom: 2px solid {t['accent']}; background: transparent; }}
+
+/* Details sections: flat, divided, no boxes */
+QFrame#section {{ background: transparent; border: none; border-bottom: 1px solid {t['border']}; border-radius: 0; }}
+QToolButton#sectionHead {{ background: transparent; border: none; border-radius: 6px; padding: 9px 2px;
+    font-weight: 600; font-size: 9.5pt; text-align: left; }}
+QToolButton#sectionHead:hover {{ background: transparent; color: {t['accent']}; }}
+QLabel#sectionNote {{ color: {t['muted']}; font-size: 9pt; }}
+QLabel#val {{ color: {t['muted']}; font-size: 9pt; }}
+QLabel#muted {{ color: {t['muted']}; font-size: 9pt; }}
+QLabel {{ background: transparent; }}
+
+/* inputs */
 QSpinBox, QDoubleSpinBox, QLineEdit, QPlainTextEdit, QComboBox {{
-    background: {t['surface']}; border: 1px solid {t['border_strong']}; border-radius: 9px; padding: 6px 10px;
+    background: {t['sunken']}; border: 1px solid {t['border']}; border-radius: 8px; padding: 6px 10px;
     selection-background-color: {t['accent']}; selection-color: {t['on_accent']}; }}
 QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
+QLineEdit#search {{ border-radius: 16px; padding: 6px 14px; }}
 QComboBox QAbstractItemView {{ background: {t['surface']}; border: 1px solid {t['border_strong']};
     selection-background-color: {t['accent_soft']}; selection-color: {t['text']}; padding: 4px; }}
 QCheckBox {{ spacing: 8px; }}
-QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px; border: 1.5px solid {t['border_strong']}; background: {t['surface']}; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid {t['border_strong']}; background: {t['sunken']}; }}
 QCheckBox::indicator:checked {{ background: {t['accent']}; border-color: {t['accent']}; }}
 QDialogButtonBox {{ padding-top: 6px; }}
 
-QListWidget {{ background: transparent; border: none; padding: 2px 8px 8px 8px; }}
-QListWidget::item {{ padding: 8px 10px; border-radius: 8px; color: {t['muted']}; }}
-QListWidget::item:hover {{ background: {t['sunken']}; }}
-QListWidget::item:selected {{ background: {t['accent_soft']}; color: {t['text']}; }}
+/* sliders: thin magenta track, round handle */
+QSlider::groove:horizontal {{ height: 4px; background: {t['border_strong']}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {t['text']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
+QSlider::handle:horizontal:hover {{ background: {t['accent']}; }}
 
-QScrollBar:vertical {{ width: 12px; background: transparent; margin: 2px; }}
-QScrollBar:horizontal {{ height: 12px; background: transparent; margin: 2px; }}
-QScrollBar::handle {{ background: {t['border_strong']}; border-radius: 4px; min-height: 32px; min-width: 32px; }}
+/* lists (media bin) */
+QListWidget {{ background: transparent; border: none; padding: 2px; }}
+QListWidget::item {{ padding: 6px; border-radius: 8px; color: {t['muted']}; }}
+QListWidget::item:hover {{ background: {t['surface']}; }}
+QListWidget::item:selected {{ background: {t['accent_soft']}; color: {t['text']}; border: 1px solid {t['accent']}; }}
+
+QScrollArea {{ background: transparent; border: none; }}
+QScrollBar:vertical {{ width: 10px; background: transparent; margin: 2px; }}
+QScrollBar:horizontal {{ height: 10px; background: transparent; margin: 2px; }}
+QScrollBar::handle {{ background: {t['border_strong']}; border-radius: 3px; min-height: 32px; min-width: 32px; }}
 QScrollBar::handle:hover {{ background: {t['faint']}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
-QFrame#dropzone {{ background: {t['surface']}; border: 1.5px dashed {t['border_strong']}; border-radius: 24px; }}
-QLabel#h1 {{ font-family: {SERIF}; font-size: 25pt; }}
-QLabel#sub {{ color: {t['muted']}; font-size: 11pt; }}
-QLabel#kbd {{ background: {t['sunken']}; border: 1px solid {t['border']}; border-radius: 7px; padding: 3px 9px;
-             color: {t['muted']}; font-family: {MONO}; font-size: 9pt; }}
+/* empty-state / text preset cards */
+QFrame#dropzone {{ background: {t['sunken']}; border: 1.5px dashed {t['border_strong']}; border-radius: 12px; }}
+QPushButton#card {{ background: {t['surface']}; border: 1px solid {t['border']}; border-radius: 10px;
+    padding: 16px 10px; font-weight: 600; text-align: center; }}
+QPushButton#card:hover {{ border-color: {t['accent']}; background: {t['accent_soft']}; }}
 
-QTabWidget::pane {{ border: 1px solid {t['border']}; background: {t['bg']}; border-radius: 10px; top: -1px; }}
-QTabBar::tab {{ background: {t['surface']}; color: {t['muted']}; border: 1px solid {t['border']};
-               padding: 6px 14px; border-top-left-radius: 7px; border-top-right-radius: 7px;
-               margin-right: 3px; font-weight: 500; font-size: 9pt; }}
-QTabBar::tab:selected {{ background: {t['bg']}; color: {t['text']}; border-bottom-color: {t['bg']}; font-weight: 600; }}
-QTabBar::tab:hover:!selected {{ background: {t['sunken']}; color: {t['text']}; }}
+/* player */
+QWidget#monitor {{ background: {t['canvas']}; }}
+QFrame#transport {{ background: {t['panel']}; border: none; border-top: 1px solid {t['border']}; }}
+QLabel#tcMain {{ font-family: {MONO}; font-size: 11pt; font-weight: 700; color: {t['accent']}; }}
+QLabel#tcDur {{ font-family: {MONO}; font-size: 10pt; color: {t['muted']}; }}
+QLabel#fmtLabel {{ color: {t['muted']}; font-size: 8.5pt; padding: 2px 4px; }}
+QToolButton#transportBtn {{ border-radius: 8px; padding: 6px; }}
+QToolButton#playBtn {{ background: {t['accent']}; border: none; border-radius: 18px; padding: 8px; }}
+QToolButton#playBtn:hover {{ background: {t['accent_hover']}; }}
 
-QToolBar#toolbox {{ background: {t['surface']}; border-right: 1px solid {t['border']}; padding: 6px 4px; spacing: 4px; }}
-QToolBar#toolbox QToolButton {{ width: 28px; height: 28px; border-radius: 6px; padding: 3px; }}
-QToolBar#toolbox QToolButton:hover {{ background: {t['sunken']}; }}
-QToolBar#toolbox QToolButton:checked {{ background: {t['accent_soft']}; border: 1px solid {t['accent']}; }}
-
-QToolBar#optionsBar {{ background: {t['bg']}; border-bottom: 1px solid {t['border']}; padding: 3px 10px; spacing: 8px; min-height: 36px; }}
-QToolBar#optionsBar QLabel {{ font-size: 9pt; color: {t['muted']}; }}
-
-QListWidget#layerList {{ background: {t['surface']}; border: 1px solid {t['border']}; border-radius: 8px; padding: 4px; }}
-QListWidget#layerList::item {{ padding: 3px 6px; border-radius: 6px; margin-bottom: 2px; }}
-QListWidget#layerList::item:hover {{ background: {t['sunken']}; }}
-QListWidget#layerList::item:selected {{ background: {t['accent_soft']}; border: 1px solid {t['accent']}; color: {t['text']}; }}
-
-/* Photoshop-style Vertical Icon Sub-bar (Right Dock) */
-QFrame#subBar, QWidget#subBar, QWidget#sideSubBar {{
-    background: {t['surface']};
-    border-left: 1px solid {t['border']};
-    min-width: 38px;
-    max-width: 38px;
-}}
-QToolButton#sideBarBtn, QPushButton#sideBarBtn {{
-    width: 30px;
-    height: 30px;
-    border-radius: 6px;
-    padding: 3px;
-    border: none;
-    background: transparent;
-}}
-QToolButton#sideBarBtn:hover, QPushButton#sideBarBtn:hover {{
-    background: {t['sunken']};
-}}
-QToolButton#sideBarBtn:checked, QPushButton#sideBarBtn:checked {{
-    background: {t['accent_soft']};
-    border-left: 3px solid {t['accent']};
-    border-radius: 2px 6px 6px 2px;
-}}
-QToolButton#sideBarToggle, QPushButton#sideBarToggle {{
-    width: 28px;
-    height: 28px;
-    border-radius: 6px;
-    border: none;
-    background: transparent;
-}}
-QToolButton#sideBarToggle:hover, QPushButton#sideBarToggle:hover {{
-    background: {t['sunken']};
-}}
-
-/* Photoshop-style Panel Header */
-QFrame#sidebarHeader, QFrame#panelHeader {{
-    background: {t['panel']};
-    border-bottom: 1px solid {t['border']};
-    padding: 6px 8px;
-    min-height: 28px;
-}}
-QFrame#sidebarHeader QLabel, QFrame#panelHeader QLabel#panelTitle {{
-    font-size: 8.5pt;
-    font-weight: 700;
-    color: {t['text']};
-    letter-spacing: 1px;
-}}
-QFrame#panelHeader QToolButton {{
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    padding: 2px;
-}}
-QFrame#panelHeader QToolButton:hover {{
-    background: {t['sunken']};
-}}
-
-/* Layer Action Buttons at bottom of Layers Panel */
-QToolButton#layerActionBtn {{
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 5px;
-    padding: 3px;
-    min-width: 24px;
-    max-width: 26px;
-    min-height: 24px;
-    max-height: 26px;
-}}
-QToolButton#layerActionBtn:hover {{
-    background: {t['sunken']};
-    border-color: {t['border']};
-}}
-QToolButton#layerActionBtn:pressed {{
-    background: {t['border']};
-}}
-QToolButton#layerFilterBtn {{
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    padding: 2px;
-    min-width: 22px;
-    max-width: 24px;
-    min-height: 22px;
-    max-height: 24px;
-}}
-QToolButton#layerFilterBtn:hover {{
-    background: {t['sunken']};
-}}
-QToolButton#layerFilterBtn:checked {{
-    background: {t['accent_soft']};
-    border: 1px solid {t['accent']};
-}}
+/* timeline toolbar */
+QFrame#tlBar {{ background: {t['panel']}; border: none; border-bottom: 1px solid {t['border']}; }}
+QFrame#tlBar QFrame#vsep {{ background: {t['border']}; max-width: 1px; min-width: 1px; }}
+QToolButton#tlBtn {{ border-radius: 6px; padding: 5px; }}
+QToolButton#tlBtn:checked {{ background: {t['accent_soft']}; border: 1px solid transparent; }}
+QToolButton#tlText {{ border-radius: 6px; padding: 5px 9px; font-size: 9pt; font-weight: 500; }}
 """
 
 
@@ -392,7 +404,8 @@ def set_theme(app, name):
     T.clear(); T.update(DARK if name == "dark" else LIGHT)
     app.setPalette(_palette(T))
     app.setStyleSheet(qss(T))
-    QSettings("Venma", "VideoEditor").setValue("theme", name)
+    refresh_icons()
+    QSettings("Venma", "VideoEditor").setValue("theme_v2", name)
 
 
 def init(app):
@@ -403,7 +416,7 @@ def init(app):
     else:
         font = app.font()
     app.setFont(font)
-    set_theme(app, QSettings("Venma", "VideoEditor").value("theme", "light"))
+    set_theme(app, QSettings("Venma", "VideoEditor").value("theme_v2", "dark"))
 
 
 def tidy(dlg):

@@ -52,7 +52,8 @@ class PreviewView(QWidget):
     main window applies them (so undo, the Properties panel and saving all stay in one place).
     """
 
-    titlePicked = pyqtSignal(str)               # clip id of the title that was clicked (select it)
+    clipDragged = pyqtSignal(str, object)       # picture (image / video) clip id, {pos_x, pos_y} or {scale}  (live)
+    titlePicked = pyqtSignal(str)               # clip id of the title / picture that was clicked (select it)
     titleDragged = pyqtSignal(str, object)      # clip id, {pos_x, pos_y} or {size}  (live, while dragging)
     titleGestureDone = pyqtSignal(str, str)     # clip id, undo label (mouse released after a real change)
 
@@ -65,6 +66,7 @@ class PreviewView(QWidget):
         self.img = None
         self.titles_provider = None          # callable -> title clips visible at the current time
         self.selected_provider = None        # callable -> id of the selected clip (or None)
+        self.layers_provider = None          # callable -> [(clip, (cx, cy, w, h) as frame fractions)] bottom first
         self._drag = None                    # active gesture, see mousePressEvent
         self._guides = (False, False)        # show the vertical / horizontal centre guide
         self.setMinimumSize(200, 120)
@@ -105,11 +107,22 @@ class PreviewView(QWidget):
                 out.append((c, lay[2]))
         return out
 
+    def _layer_boxes(self):
+        """[(clip, box QRectF)] for the picture layers visible now (images / videos), bottom-most first."""
+        if self.layers_provider is None:
+            return []
+        f = QRectF(self._frame_rect())
+        out = []
+        for c, (cx, cy, w, h) in self.layers_provider() or []:
+            out.append((c, QRectF(f.x() + (cx - w / 2) * f.width(), f.y() + (cy - h / 2) * f.height(),
+                                  w * f.width(), h * f.height())))
+        return out
+
     def _selected_box(self):
         sid = self.selected_provider() if self.selected_provider else None
         if not sid:
             return None, None
-        for c, box in self._title_boxes():
+        for c, box in self._title_boxes() + self._layer_boxes():
             if c.id == sid:
                 return c, box
         return None, None
@@ -128,7 +141,11 @@ class PreviewView(QWidget):
         return None, None
 
     def _title_at(self, pos):
+        """Top-most title, else top-most picture layer, under ``pos`` (titles always sit above pictures)."""
         for c, box in reversed(self._title_boxes()):          # top-most first
+            if box.adjusted(-4, -4, 4, 4).contains(pos):
+                return c
+        for c, box in reversed(self._layer_boxes()):
             if box.adjusted(-4, -4, 4, 4).contains(pos):
                 return c
         return None
@@ -144,14 +161,17 @@ class PreviewView(QWidget):
             _, box = self._selected_box()
             center = box.center()
             d0 = max(4.0, math.hypot(pos.x() - center.x(), pos.y() - center.y()))
-            self._drag = dict(mode="resize", id=c.id, center=center, d0=d0, size0=float(c.title["size"]),
-                              changed=False)
+            pic = c.title is None
+            self._drag = dict(mode="resize", id=c.id, center=center, d0=d0, pic=pic,
+                              size0=float(c.scale if pic else c.title["size"]), changed=False)
             return
         c = self._title_at(pos)
         if c is not None:
             self.titlePicked.emit(c.id)
-            self._drag = dict(mode="move", id=c.id, start=pos, x0=float(c.title["pos_x"]),
-                              y0=float(c.title["pos_y"]), frame=frame, changed=False)
+            pic = c.title is None
+            self._drag = dict(mode="move", id=c.id, start=pos, pic=pic,
+                              x0=float(c.pos_x if pic else c.title["pos_x"]),
+                              y0=float(c.pos_y if pic else c.title["pos_y"]), frame=frame, changed=False)
             self.setCursor(Qt.SizeAllCursor)
             return
         super().mousePressEvent(e)
@@ -172,16 +192,21 @@ class PreviewView(QWidget):
                     nx, gx = 0.5, True
                 if abs(ny - 0.5) < self.SNAP:
                     ny, gy = 0.5, True
-            nx, ny = min(1.0, max(0.0, nx)), min(1.0, max(0.0, ny))
+            lo, hi = (-0.5, 1.5) if d["pic"] else (0.0, 1.0)      # a picture may be pushed partly off the frame
+            nx, ny = min(hi, max(lo, nx)), min(hi, max(lo, ny))
             self._guides = (gx, gy)
             d["changed"] = True
-            self.titleDragged.emit(d["id"], {"pos_x": round(nx, 4), "pos_y": round(ny, 4)})
+            vals = {"pos_x": round(nx, 4), "pos_y": round(ny, 4)}
+            (self.clipDragged if d["pic"] else self.titleDragged).emit(d["id"], vals)
         else:
             ctr = d["center"]
             dist = math.hypot(pos.x() - ctr.x(), pos.y() - ctr.y())
-            size = int(round(min(600.0, max(8.0, d["size0"] * dist / d["d0"]))))
             d["changed"] = True
-            self.titleDragged.emit(d["id"], {"size": size})
+            if d["pic"]:
+                self.clipDragged.emit(d["id"], {"scale": round(min(10.0, max(0.05, d["size0"] * dist / d["d0"])), 4)})
+            else:
+                size = int(round(min(600.0, max(8.0, d["size0"] * dist / d["d0"]))))
+                self.titleDragged.emit(d["id"], {"size": size})
         self.update()
 
     def mouseReleaseEvent(self, e):
@@ -189,7 +214,8 @@ class PreviewView(QWidget):
         self._guides = (False, False)
         if d is not None and e.button() == Qt.LeftButton:
             if d["changed"]:
-                self.titleGestureDone.emit(d["id"], "Move Title" if d["mode"] == "move" else "Resize Title")
+                what = "Clip" if d["pic"] else "Title"
+                self.titleGestureDone.emit(d["id"], f"{'Move' if d['mode'] == 'move' else 'Resize'} {what}")
             self._update_cursor(QPointF(e.pos()))
             self.update()
             return
@@ -451,6 +477,7 @@ class PreviewEngine(QObject):
         self._seek_timer.timeout.connect(self._after_seek)
 
         self.view.titles_provider = self._titles_now
+        self.view.layers_provider = self._layers_now
         self.stills = _StillWorker(self)
         self.stills.ready.connect(self._on_still)
         self.stills.start()
@@ -520,6 +547,11 @@ class PreviewEngine(QObject):
 
     def _titles_now(self):
         return self.project.titles_at(self.t) if self.project else []
+
+    def _layers_now(self):
+        """Picture clips visible now with their on-frame boxes (so they can be picked / moved / resized)."""
+        p = self.project
+        return [(c, p.fit_box(c)) for c in p.video_clips_at(self.t)] if p else []
 
     # ── public API (same as before) ──────────────────────────────────────────────────────────
     def set_project(self, project, reset=False):
@@ -621,6 +653,7 @@ class PreviewEngine(QObject):
         m = self.project.media[c.media_id]
         return (c.id, m.path, round(c.start, 4), round(c.in_point, 4), round(c.duration, 4),
                 round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3),
+                round(c.scale, 4), round(c.pos_x, 4), round(c.pos_y, 4),
                 self._pw, self._ph, self._pfps)
 
     def _akey(self, c):
@@ -800,6 +833,26 @@ class PreviewEngine(QObject):
         p, t = self.project, self.t
         if not p:
             return
+        layers = p.video_clips_at(t)
+        if len(layers) > 1:                                  # several layers visible: show them stacked
+            sig = tuple((c.media_id, round((t - c.start + c.in_point) * p.fps), round(c.opacity, 3),
+                         round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3),
+                         round(c.scale, 4), round(c.pos_x, 4), round(c.pos_y, 4)) for c in layers)
+            key = ("@layers", sig, self._pw, self._ph)
+            self._want = key
+            self._black = False
+            img = self._cache.get(key)
+            if img is not None:
+                self._cache.move_to_end(key)
+                self.view.set_image(img)
+                return
+            try:
+                cmd = ft.composite_still_cmd(p, t, self._pw, self._ph)
+            except RuntimeError as e:
+                self.message.emit(str(e))
+                return
+            self.stills.request(key, cmd, self._pw * self._ph * 3)
+            return
         vc = p.top_video_clip_at(t)
         if vc is None:
             self._want = None
@@ -813,7 +866,8 @@ class PreviewEngine(QObject):
             src = vc.in_point + (t - vc.start)
             src = min(max(0.0, src), max(0.0, m.duration - 1.0 / max(1, p.fps)))
         key = (m.path, round(src * p.fps), self._pw, self._ph,
-               round(vc.brightness, 3), round(vc.contrast, 3), round(vc.saturation, 3))
+               round(vc.brightness, 3), round(vc.contrast, 3), round(vc.saturation, 3),
+               round(vc.scale, 4), round(vc.pos_x, 4), round(vc.pos_y, 4))
         self._want = key
         self._black = False
         img = self._cache.get(key)

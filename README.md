@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
 
-A video editor built with the same design language and workspace layout as Venma (PyQt5):
-warm paper/charcoal theme, vertical tool palette on the left, context options bar on top, tabbed
-side panels, light/dark mode. Currently **v0.1** (initial version).
+A desktop video editor (PyQt5 + FFmpeg) with a **CapCut Pro-style interface**: dark theme with a cyan accent, one slim
+top bar (Menu, project name, Export), a Media / Text panel, the Player and a Details panel across the top, and the
+timeline with its own toolbar underneath. Fixed layout with draggable splitters; dark/light mode. Currently **v0.1**.
 
 ## Quick start
 
@@ -31,8 +31,10 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 
 ## What it does
 - **Media bin**: import video, audio and images (button, `Ctrl+I`, or drag files onto the window), thumbnails, drag onto the timeline or double-click to append at the playhead.
-- **Timeline**: 2 video tracks (V2 on top of V1) + 2 audio tracks, ruler, playhead scrubbing, snapping, zoom, scroll.
-- **Editing**: move (also between tracks), trim by dragging clip edges, **Ripple Edit tool** (trim an edge and later clips on the track follow, so no gap is left), **Slip tool** (change which part of the source plays without moving or resizing the clip), split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, unlimited-ish undo/redo (100 steps) with a History panel.
+- **Automatic typed layers, CapCut style**: drop or import anything and it lands on the right layer, created for you if it doesn't exist yet: **Video**, **Photo**, **Text** or **Audio**. Stacking order is Text, Photo, Video, Audio (top to bottom). If a layer is busy at that time, a second one of the same type is added. A clip dropped on the wrong layer is re-routed to its own type, and clips can only be moved between layers of the same type. Each layer header has a type icon and colour stripe. `Layer` / `Audio` buttons, the dashed *new layer* strips and the right-click menu on a layer header still add or reorder layers by hand; `Menu > Insert > Remove Empty Layers` tidies up. Projects saved by older versions keep their old untyped layers.
+- **Unlimited files**: import any number of files at once (one undo step per batch); select several in the media bin (`Ctrl`/`Shift`-click) and drag or add them together.
+- **Timeline**: ruler, playhead scrubbing, snapping, zoom, scroll.
+- **Editing**: move (also between tracks), trim by dragging clip edges, **Ripple Edit tool** (trim an edge and later clips on the track follow, so no gap is left), **Slip tool** (change which part of the source plays without moving or resizing the clip), split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, undo/redo (100 steps).
 - **Text & titles**: add a Title, Lower third or Subtitle at the playhead (`Insert` menu, the **Text** toolbar button, or `Ctrl+T`). Titles are ordinary clips on the top video track, so they move, trim, split, ripple and undo like everything else. Edit the text, font, size, bold/italic, alignment, colour, outline, background box, opacity and X/Y position in the Properties panel; they show live in the preview.
 - **Clip properties**: volume (0–200 %), opacity, brightness, contrast, saturation.
 - **Preview**: program monitor with transport (play/pause, frame step, start/end) and timecode. Decoded by FFmpeg in background QThreads (no QtMultimedia video / codec packs needed), so it never shows a black screen; sound plays through QAudioOutput.
@@ -42,7 +44,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 ## Shortcuts
 | Key | Action |
 |---|---|
-| `V` / `B` / `Y` / `C` / `H` / `Z` | Select / Ripple Edit / Slip / Razor / Hand / Zoom tool |
+| `V` / `B` / `Y` / `C` | Select / Ripple Edit / Slip / Razor tool |
 | `Space` | Play / pause |
 | `Left` / `Right` | Previous / next frame |
 | `Home` / `End` | Go to start / end |
@@ -58,7 +60,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 | `Ctrl+Shift+D` | Dark / light theme |
 
 ## Known limits of v0.1
-- Preview plays the topmost clip's own video and the first audio-track clip. Opacity, colour
+- While paused or scrubbing, the preview stacks all visible layers (opacity and colour included); during playback it plays the topmost clip's own video and the first audio-track clip. Opacity, colour
   correction, volume boost above 100 % and mixing several audio tracks show up in the **export** only.
 - Preview audio needs QtMultimedia (PyQt5 wheel includes it). Without an audio device the preview plays silently.
 - No transitions, speed changes, keyframes, or audio waveforms yet. Titles have no animation or fades yet, and
@@ -76,11 +78,12 @@ venma_video/
 │   ├── project.py        # timeline model (media, clips, tracks), edits, JSON snapshots for undo
 │   └── ffmpeg_tools.py   # locate/probe/thumbnail + the filter_complex export builder
 ├── ui/
-│   ├── main_window.py    # application layout, menus, commands
+│   ├── main_window.py    # top bar, panels, timeline toolbar, commands
 │   ├── timeline.py       # multi-track timeline widget
 │   ├── preview.py        # preview monitor + threaded FFmpeg playback engine
 │   ├── titles.py         # Qt painter for titles, shared by the preview and the export
-│   ├── panels.py         # Media bin, Properties, History, New-project and Export dialogs
+│   ├── panels.py         # Media bin, Text presets, Details (properties), New-project and Export dialogs
+│   ├── docks.py          # CollapsibleSection and small toolbar helpers
 │   └── theme.py          # shared Venma design tokens, icons and stylesheet
 └── assets/           # app icon (venma.ico) and other static files
 tests/                # unittest/pytest suite

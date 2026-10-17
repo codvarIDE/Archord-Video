@@ -3,18 +3,19 @@ import math
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QRect, pyqtSignal, QByteArray
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QPainterPath, QFont, QFontMetrics, QPolygonF, QPixmap
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollBar
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QScrollBar, QMenu
 
 from . import theme
-from ..core.project import MIN_CLIP, STILL_KINDS
+from ..core.project import MIN_CLIP, NEW_BOTTOM, NEW_TOP, STILL_KINDS
 
 MIME_MEDIA = "application/x-venma-media"
-HEADER_W = 84
+HEADER_W = 100
 RULER_H = 28
 TRACK_H = 58
+LANE_H = 28           # the empty "drop here for a new layer" strips above the first and below the last track
 EDGE = 7              # px grab zone for trimming
 SNAP_PX = 9
-KIND_COLORS = {"video": "#D97757", "image": "#C79A3B", "audio": "#4F86B5", "text": "#8B6BB5"}
+KIND_COLORS = {"video": "#2F6E8E", "image": "#8A6A2F", "audio": "#1F8A83", "text": "#6D58B8"}
 _STEPS = [0.04, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800]
 
 
@@ -49,7 +50,10 @@ class TimelineCanvas(QWidget):
     clipRippled = pyqtSignal(str, str, float)    # id, "left" | "right", new edge time (later clips shift)
     clipSlipped = pyqtSignal(str, float)         # id, new in-point (clip position/length unchanged)
     splitRequested = pyqtSignal(str, float)
-    mediaDropped = pyqtSignal(str, int, float)   # media id, track, time
+    mediaDropped = pyqtSignal(str, int, float)   # media id(s) separated by newlines, track (or NEW_TOP / NEW_BOTTOM), time
+    trackAddRequested = pyqtSignal(str, int)     # "video" | "audio", index to insert the new track at
+    trackRemoveRequested = pyqtSignal(int)       # track index
+    trackMoveRequested = pyqtSignal(int, int)    # track index, -1 (up) / +1 (down)
     viewChanged = pyqtSignal()
     statusMessage = pyqtSignal(str)
 
@@ -59,6 +63,7 @@ class TimelineCanvas(QWidget):
         self.thumbs = {}            # media id -> QPixmap
         self.pps = 80.0             # pixels per second
         self.scroll = 0.0           # seconds at the left edge of the track area
+        self.vscroll = 0.0          # pixels scrolled down (any number of layers fit; the rest scroll)
         self.playhead = 0.0
         self.selected = None
         self.tool = "select"
@@ -74,7 +79,7 @@ class TimelineCanvas(QWidget):
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setMinimumHeight(RULER_H + 4 * TRACK_H + 6)
+        self.setMinimumHeight(RULER_H + LANE_H + 2 * TRACK_H)
 
     def invalidate(self):
         """Something static changed (clips, zoom, selection, theme): re-render the cached layer."""
@@ -84,7 +89,7 @@ class TimelineCanvas(QWidget):
     # ── data ─────────────────────────────────────────────────────────────────
     def set_project(self, project):
         self.project = project
-        self.setMinimumHeight(RULER_H + len(project.tracks) * TRACK_H + 6)
+        self.vscroll = max(0.0, min(self.vscroll, max(0.0, self.content_height() - self.view_height())))
         if self.selected and not project.clip(self.selected):
             self.selected = None
             self.clipSelected.emit(None)
@@ -104,13 +109,41 @@ class TimelineCanvas(QWidget):
         return self.scroll + (x - HEADER_W) / self.pps
 
     def track_y(self, i):
-        return RULER_H + i * TRACK_H
+        return RULER_H + LANE_H + i * TRACK_H - self.vscroll
+
+    def lane_y(self, lane):
+        """Top edge of the NEW_TOP / NEW_BOTTOM drop strip."""
+        if lane == NEW_TOP:
+            return RULER_H - self.vscroll
+        return self.track_y(len(self.project.tracks))
+
+    def content_height(self):
+        n = len(self.project.tracks) if self.project else 0
+        return 2 * LANE_H + n * TRACK_H
+
+    def view_height(self):
+        return max(1, self.height() - RULER_H)
 
     def track_at(self, y):
-        if not self.project:
+        if not self.project or y < RULER_H:
             return -1
-        i = int((y - RULER_H) // TRACK_H)
+        i = int((y - self.track_y(0)) // TRACK_H)
         return i if 0 <= i < len(self.project.tracks) else -1
+
+    def lane_at(self, y):
+        """NEW_TOP / NEW_BOTTOM when y is over one of the "new layer" strips, else None."""
+        if not self.project or y < RULER_H:
+            return None
+        for lane in (NEW_TOP, NEW_BOTTOM):
+            top = self.lane_y(lane)
+            if top <= y < top + LANE_H:
+                return lane
+        return None
+
+    def _row_top(self, track):
+        if track in (NEW_TOP, NEW_BOTTOM):                  # a clip being dragged into a new-layer strip
+            return self.lane_y(track) + LANE_H / 2 - TRACK_H / 2
+        return self.track_y(track)
 
     def view_seconds(self):
         return max(0.1, (self.width() - HEADER_W) / self.pps)
@@ -123,7 +156,7 @@ class TimelineCanvas(QWidget):
         start = c.start if start is None else start
         dur = c.duration if dur is None else dur
         track = c.track if track is None else track
-        return QRectF(self.t2x(start), self.track_y(track) + 3, max(2.0, dur * self.pps), TRACK_H - 6)
+        return QRectF(self.t2x(start), self._row_top(track) + 3, max(2.0, dur * self.pps), TRACK_H - 6)
 
     # ── view control ─────────────────────────────────────────────────────────
     def set_scroll(self, s):
@@ -132,6 +165,29 @@ class TimelineCanvas(QWidget):
             self.scroll = s
             self.invalidate()
             self.viewChanged.emit()
+
+    def set_vscroll(self, v):
+        v = max(0.0, min(v, max(0.0, self.content_height() - self.view_height())))
+        if abs(v - self.vscroll) > 1e-9:
+            self.vscroll = v
+            self.invalidate()
+            self.viewChanged.emit()
+
+    def ensure_track_visible(self, i):
+        top = LANE_H + i * TRACK_H                           # in content coordinates
+        if i <= 0:
+            self.set_vscroll(0.0)
+        elif top < self.vscroll:
+            self.set_vscroll(top)
+        elif top + TRACK_H > self.vscroll + self.view_height():
+            self.set_vscroll(top + TRACK_H - self.view_height())
+
+    def _autoscroll(self, y):
+        """Drags near the top / bottom edge scroll the layers so any layer can be reached."""
+        if y > self.height() - 18:
+            self.set_vscroll(self.vscroll + 14)
+        elif RULER_H <= y < RULER_H + 16:
+            self.set_vscroll(self.vscroll - 14)
 
     def zoom_by(self, factor, anchor_x=None):
         ax = (self.width() / 2) if anchor_x is None else anchor_x
@@ -214,11 +270,22 @@ class TimelineCanvas(QWidget):
             self._pan = (e.globalPos().x(), self.scroll)
             self.setCursor(Qt.ClosedHandCursor)
             return
+        if e.button() == Qt.RightButton:
+            if pos.x() < HEADER_W and pos.y() >= RULER_H:
+                self._header_menu(e.globalPos(), pos)
+            return
         if e.button() != Qt.LeftButton:
             return
         if pos.y() < RULER_H and pos.x() >= HEADER_W:
             self._scrub = True
             self._seek_to_x(pos.x())
+            return
+        if pos.x() < HEADER_W and pos.y() >= RULER_H:          # track header column
+            lane = self.lane_at(pos.y())
+            if lane == NEW_TOP:
+                self.trackAddRequested.emit("video", 0)
+            elif lane == NEW_BOTTOM:
+                self.trackAddRequested.emit("audio", len(self.project.tracks))
             return
         if self.tool == "zoom":
             self.zoom_by(0.8 if e.modifiers() & Qt.AltModifier else 1.25, pos.x())
@@ -293,13 +360,22 @@ class TimelineCanvas(QWidget):
                 d["dur"], d["shift"] = edge - c.start, edge - c.end
             d["start"] = c.start
         elif d["zone"] == "body":
+            self._autoscroll(pos.y())
             start = self.snap(t - d["grab"], ignore=c.id, also=(c.duration,))
-            track = self.track_at(pos.y())
             m = self.project.media[c.media_id]
-            if track < 0 or not self.project.track_accepts(track, m.kind):
-                track = d["track0"]
+            lane = self.lane_at(pos.y())
+            is_audio = m.kind == "audio"
+            if lane is not None and (lane == NEW_BOTTOM) == is_audio:
+                track = lane                                   # over a "new layer" strip that fits this clip
+            else:
+                track = self.track_at(pos.y())
+                if track < 0 or not self.project.track_accepts(track, m.kind):
+                    track = d["track0"]
             d["track"] = track
-            d["start"] = self.project.resolve_start(track, max(0.0, start), c.duration, ignore=c.id)
+            if track in (NEW_TOP, NEW_BOTTOM):
+                d["start"] = max(0.0, start)                   # a brand-new layer is always empty
+            else:
+                d["start"] = self.project.resolve_start(track, max(0.0, start), c.duration, ignore=c.id)
             d["dur"] = c.duration
         elif d["zone"] == "left":
             lo, _ = self.project.trim_limits(c.id)
@@ -351,13 +427,16 @@ class TimelineCanvas(QWidget):
 
     def wheelEvent(self, e):
         dy = e.angleDelta().y() or e.angleDelta().x()
-        if e.modifiers() & Qt.ControlModifier:
+        if e.modifiers() & Qt.AltModifier:                   # Alt + wheel: scroll through the layers
+            self.set_vscroll(self.vscroll - (dy / 120.0) * TRACK_H)
+        elif e.modifiers() & Qt.ControlModifier:
             self.zoom_by(1.2 if dy > 0 else 1 / 1.2, e.pos().x())
         else:
             self.set_scroll(self.scroll - (dy / 120.0) * 60.0 / self.pps)
         e.accept()
 
     def resizeEvent(self, e):
+        self.set_vscroll(self.vscroll)
         self.viewChanged.emit()
         super().resizeEvent(e)
 
@@ -368,7 +447,10 @@ class TimelineCanvas(QWidget):
 
     def dragMoveEvent(self, e):
         if e.mimeData().hasFormat(MIME_MEDIA):
-            self._drop = (self.track_at(e.pos().y()), max(0.0, self.snap(self.x2t(e.pos().x()))))
+            lane = self.lane_at(e.pos().y())
+            self._autoscroll(e.pos().y())
+            self._drop = (lane if lane is not None else self.track_at(e.pos().y()),
+                          max(0.0, self.snap(self.x2t(e.pos().x()))))
             self.invalidate()
             e.acceptProposedAction()
 
@@ -379,11 +461,41 @@ class TimelineCanvas(QWidget):
     def dropEvent(self, e):
         self._drop = None
         if e.mimeData().hasFormat(MIME_MEDIA):
-            mid = bytes(e.mimeData().data(MIME_MEDIA)).decode("utf-8")
+            mid = bytes(e.mimeData().data(MIME_MEDIA)).decode("utf-8")      # one id, or several joined by newlines
             t = max(0.0, self.snap(self.x2t(e.pos().x())))
-            self.mediaDropped.emit(mid, self.track_at(e.pos().y()), t)
+            lane = self.lane_at(e.pos().y())
+            self.mediaDropped.emit(mid, lane if lane is not None else self.track_at(e.pos().y()), t)
             e.acceptProposedAction()
         self.invalidate()
+
+    # ── layer menu (right-click a track header) ──────────────────────────────
+    def _header_menu(self, global_pos, pos):
+        tracks = self.project.tracks
+        menu = QMenu(self)
+        i = self.track_at(pos.y())
+        lane = self.lane_at(pos.y())
+        if i >= 0:
+            kind = tracks[i]["kind"]
+            noun = "layer" if kind == "video" else "audio track"
+            menu.addAction(f"Add {noun} above", lambda: self.trackAddRequested.emit(kind, i))
+            menu.addAction(f"Add {noun} below", lambda: self.trackAddRequested.emit(kind, i + 1))
+            menu.addSeparator()
+            up = menu.addAction("Move up (stack higher)" if kind == "video" else "Move up",
+                                lambda: self.trackMoveRequested.emit(i, -1))
+            up.setEnabled(i > 0 and tracks[i - 1]["kind"] == kind)
+            down = menu.addAction("Move down (stack lower)" if kind == "video" else "Move down",
+                                  lambda: self.trackMoveRequested.emit(i, 1))
+            down.setEnabled(i + 1 < len(tracks) and tracks[i + 1]["kind"] == kind)
+            menu.addSeparator()
+            rm = menu.addAction(f"Delete {noun} {tracks[i]['name']} (and its clips)",
+                                lambda: self.trackRemoveRequested.emit(i))
+            rm.setEnabled(self.project.can_remove_track(i))
+        elif lane is not None:
+            menu.addAction("Add video layer on top", lambda: self.trackAddRequested.emit("video", 0))
+            menu.addAction("Add audio track at the bottom",
+                           lambda: self.trackAddRequested.emit("audio", len(tracks)))
+        if not menu.isEmpty():
+            menu.exec_(global_pos)
 
     # ── painting ─────────────────────────────────────────────────────────────
     def paintEvent(self, _):
@@ -407,42 +519,84 @@ class TimelineCanvas(QWidget):
         p.fillRect(self.rect(), QColor(T["sunken"]))
         if not self.project:
             return
-        w = self.width()
+        w, h = self.width(), self.height()
         n = len(self.project.tracks)
+        body = QRectF(0, RULER_H, w, h - RULER_H)
+        p.save()
+        p.setClipRect(body)                                 # rows scrolled up simply slide under the ruler
 
         # track rows
         for i, tr in enumerate(self.project.tracks):
             y = self.track_y(i)
+            if y + TRACK_H < RULER_H or y > h:
+                continue
             p.fillRect(QRectF(HEADER_W, y, w - HEADER_W, TRACK_H), QColor(T["surface"] if i % 2 == 0 else T["panel"]))
             p.setPen(QPen(QColor(T["border"]), 1))
-            p.drawLine(HEADER_W, y + TRACK_H, w, y + TRACK_H)
+            p.drawLine(QPointF(HEADER_W, y + TRACK_H), QPointF(w, y + TRACK_H))
+
+        # "new layer" drop strips (also clickable in the header column)
+        hot = self._drop[0] if self._drop else None
+        for lane, text in ((NEW_TOP, "Drop here for a new layer"), (NEW_BOTTOM, "Drop here for a new audio track")):
+            y = self.lane_y(lane)
+            if y + LANE_H < RULER_H or y > h:
+                continue
+            r = QRectF(HEADER_W + 6, y + 3, w - HEADER_W - 12, LANE_H - 6)
+            if hot == lane:
+                fill = QColor(T["accent"]); fill.setAlpha(60)
+                p.setBrush(fill)
+            else:
+                p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(T["accent"] if hot == lane else T["faint"]), 1, Qt.DashLine))
+            p.drawRoundedRect(r, 6, 6)
+            p.setPen(QColor(T["accent"] if hot == lane else T["muted"]))
+            p.drawText(r, Qt.AlignCenter, text)
 
         # clips
         p.save()
-        p.setClipRect(QRectF(HEADER_W, RULER_H, w - HEADER_W, n * TRACK_H))
+        p.setClipRect(QRectF(HEADER_W, RULER_H, w - HEADER_W, h - RULER_H))
         for c in self.project.clips:
+            y = self.track_y(c.track)
+            if (y + TRACK_H < RULER_H or y > h) and not (self._drag and self._drag["id"] == c.id):
+                continue                                    # layer is scrolled out of view
             self._draw_clip(p, c)
         if self._drop and self._drop[0] >= 0:                          # drop indicator
             x = self.t2x(self._drop[1])
+            y0 = self.track_y(self._drop[0])
             p.setPen(QPen(QColor(T["accent"]), 2, Qt.DashLine))
-            p.drawLine(QPointF(x, self.track_y(self._drop[0])), QPointF(x, self.track_y(self._drop[0]) + TRACK_H))
+            p.drawLine(QPointF(x, y0), QPointF(x, y0 + TRACK_H))
+        elif self._drop and self._drop[0] in (NEW_TOP, NEW_BOTTOM):
+            x = self.t2x(self._drop[1])
+            y0 = self.lane_y(self._drop[0])
+            p.setPen(QPen(QColor(T["accent"]), 2, Qt.DashLine))
+            p.drawLine(QPointF(x, y0), QPointF(x, y0 + LANE_H))
         p.restore()
 
         # headers
-        p.fillRect(QRectF(0, 0, HEADER_W, self.height()), QColor(T["panel"]))
+        p.fillRect(QRectF(0, RULER_H, HEADER_W, h - RULER_H), QColor(T["panel"]))
         p.setPen(QPen(QColor(T["border"]), 1))
-        p.drawLine(HEADER_W, 0, HEADER_W, self.height())
+        p.drawLine(QPointF(HEADER_W, 0), QPointF(HEADER_W, h))
+        for lane, text in ((NEW_TOP, "+ Layer"), (NEW_BOTTOM, "+ Audio")):
+            y = self.lane_y(lane)
+            if y + LANE_H < RULER_H or y > h:
+                continue
+            p.setPen(QColor(T["accent"]))
+            p.drawText(QRectF(10, y, HEADER_W - 14, LANE_H), Qt.AlignVCenter | Qt.AlignLeft, text)
         for i, tr in enumerate(self.project.tracks):
             y = self.track_y(i)
+            if y + TRACK_H < RULER_H or y > h:
+                continue
             p.setPen(QPen(QColor(T["border"]), 1))
-            p.drawLine(0, y + TRACK_H, HEADER_W, y + TRACK_H)
-            key = ("film" if tr["kind"] == "video" else "music", T["muted"])
+            p.drawLine(QPointF(0, y + TRACK_H), QPointF(HEADER_W, y + TRACK_H))
+            ttype = tr.get("type") or ("audio" if tr["kind"] == "audio" else "video")
+            p.fillRect(QRectF(0, y + 6, 3, TRACK_H - 12), QColor(KIND_COLORS.get(ttype, "#888")))   # type colour stripe
+            key = ({"video": "film", "image": "image", "text": "text", "audio": "music"}[ttype], T["muted"])
             icon = self._icons.get(key) or self._icons.setdefault(key, theme.pixmap(key[0], key[1], 16))
-            p.drawPixmap(10, y + TRACK_H // 2 - 8, icon)
+            p.drawPixmap(12, int(y + TRACK_H // 2 - 8), icon)
             p.setPen(QColor(T["text"]))
             f = p.font(); f.setBold(True); p.setFont(f)
-            p.drawText(QRectF(34, y, HEADER_W - 38, TRACK_H), Qt.AlignVCenter | Qt.AlignLeft, tr["name"])
+            p.drawText(QRectF(36, y, HEADER_W - 40, TRACK_H), Qt.AlignVCenter | Qt.AlignLeft, tr["name"])
             f.setBold(False); p.setFont(f)
+        p.restore()
 
         self._draw_ruler(p)
 
@@ -453,7 +607,7 @@ class TimelineCanvas(QWidget):
         w = self.width()
         x = self.t2x(self.playhead)
         if HEADER_W <= x <= w:
-            col = QColor(T["accent"])
+            col = QColor("#FFFFFF" if theme.NAME == "dark" else T["text"])      # CapCut: a plain white playhead
             p.setPen(QPen(col, 1.5))
             p.drawLine(QPointF(x, 0), QPointF(x, self.height()))
             p.setPen(Qt.NoPen)
@@ -465,7 +619,7 @@ class TimelineCanvas(QWidget):
         w = self.width()
         p.fillRect(QRectF(0, 0, w, RULER_H), QColor(T["panel"]))
         p.setPen(QPen(QColor(T["border_strong"]), 1))
-        p.drawLine(0, RULER_H, w, RULER_H)
+        p.drawLine(QPointF(0, RULER_H), QPointF(w, RULER_H))
         step = ruler_step(self.pps)
         first = math.floor(self.scroll / step) * step
         t = first
@@ -586,19 +740,27 @@ class TimelineCanvas(QWidget):
 
 
 class TimelineWidget(QWidget):
-    """TimelineCanvas + horizontal scroll bar."""
+    """TimelineCanvas + horizontal (time) and vertical (layers) scroll bars."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.canvas = TimelineCanvas(self)
         self.bar = QScrollBar(Qt.Horizontal, self)
+        self.vbar = QScrollBar(Qt.Vertical, self)
+        self.vbar.setVisible(False)                        # only shown once the layers don't all fit
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        lay.addWidget(self.canvas, 1)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self.canvas, 1)
+        row.addWidget(self.vbar)
+        lay.addLayout(row, 1)
         lay.addWidget(self.bar)
         self.canvas.viewChanged.connect(self._sync_bar)
         self.bar.valueChanged.connect(lambda v: self.canvas.set_scroll(v / 100.0))
+        self.vbar.valueChanged.connect(lambda v: self.canvas.set_vscroll(float(v)))
 
     def _sync_bar(self):
         c = self.canvas
@@ -609,3 +771,11 @@ class TimelineWidget(QWidget):
         self.bar.setSingleStep(int(view * 10))
         self.bar.setValue(int(c.scroll * 100))
         self.bar.blockSignals(False)
+        rng = int(max(0.0, c.content_height() - c.view_height()))
+        self.vbar.blockSignals(True)
+        self.vbar.setRange(0, rng)
+        self.vbar.setPageStep(int(c.view_height()))
+        self.vbar.setSingleStep(TRACK_H // 2)
+        self.vbar.setValue(int(c.vscroll))
+        self.vbar.blockSignals(False)
+        self.vbar.setVisible(rng > 0)
