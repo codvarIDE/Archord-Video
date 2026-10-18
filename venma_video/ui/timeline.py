@@ -550,7 +550,8 @@ class TimelineCanvas(QWidget):
         t = self.x2t(pos.x())
         if d["zone"] == "slip":
             lo, hi = self.project.slip_limits(c.id)
-            d["in"] = min(max(d["in0"] - (t - d["t0"]), lo), hi)       # content follows the cursor
+            k = c.speed * (1.0 if c.reverse else -1.0)               # source seconds per timeline second dragged
+            d["in"] = min(max(d["in0"] + k * (t - d["t0"]), lo), hi)   # content follows the cursor
         elif d["ripple"]:
             # clips that will shift are not snap targets (they move with the edge)
             skip = {c.id} | {o.id for o in self.project.track_clips(c.track) if o.start >= c.end - 1e-9}
@@ -1006,12 +1007,25 @@ class TimelineCanvas(QWidget):
                        QFontMetrics(f).elidedText(body_txt, Qt.ElideRight, int(max(0, r.width() - 16))))
             p.setFont(base_font)
         label = "Title" if c.title is not None else m.name
+        # speed / reverse badge, e.g. "2×" or "◀ 0.5×" (shown when the clip plays at another speed or backwards)
+        badge = ""
+        if c.retimed():
+            badge = ("◀ " if c.reverse else "") + (f"{c.speed:g}×" if abs(c.speed - 1.0) > 1e-9 else "")
+            badge = badge.strip()
+        badge_w = fm.horizontalAdvance(badge) + 10 if badge and r.width() > 60 else 0
         # label bar
         bar = QColor(0, 0, 0, 70)
         p.fillRect(QRectF(r.left(), r.top(), r.width(), 14), bar)
         p.setPen(QColor("white"))
-        p.drawText(QRectF(r.left() + 6, r.top(), max(0, r.width() - 10), 14), Qt.AlignVCenter | Qt.AlignLeft,
-                   fm.elidedText(label, Qt.ElideRight, int(max(0, r.width() - 12))))
+        p.drawText(QRectF(r.left() + 6, r.top(), max(0, r.width() - 10 - badge_w), 14), Qt.AlignVCenter | Qt.AlignLeft,
+                   fm.elidedText(label, Qt.ElideRight, int(max(0, r.width() - 12 - badge_w))))
+        if badge_w:
+            pill = QRectF(r.right() - badge_w - 2, r.top() + 1, badge_w, 12)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 215))
+            p.drawRoundedRect(pill, 6, 6)
+            p.setPen(QColor(20, 20, 24))
+            p.drawText(pill, Qt.AlignCenter, badge)
         if c.animation:                                   # In / Out ramps (or a Combo bar) along the clip's bottom edge
             d_in, d_out = anim_core.durations(c.animation, c.duration)
             p.setPen(Qt.NoPen)

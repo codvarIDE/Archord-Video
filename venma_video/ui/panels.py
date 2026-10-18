@@ -1,4 +1,5 @@
 """Side panels and dialogs: Media bin, Clip properties, History, New project, Export."""
+import math
 import os
 
 from PyQt5.QtCore import Qt, QSize, QMimeData, pyqtSignal, QByteArray
@@ -7,13 +8,13 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QListWidget, QListWidgetItem,
     QAbstractItemView, QComboBox, QSpinBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
     QFileDialog, QFrame, QGridLayout, QPlainTextEdit, QFontComboBox, QToolButton, QCheckBox,
-    QColorDialog, QScrollArea, QMenu, QSizePolicy,
+    QColorDialog, QScrollArea, QMenu, QSizePolicy, QDoubleSpinBox,
 )
 
 from . import theme
 from ..core import animation as anim
 from ..core import ffmpeg_tools as ft
-from ..core.project import PRESETS, KEYFRAMED_PROPS
+from ..core.project import PRESETS, KEYFRAMED_PROPS, MIN_SPEED, MAX_SPEED, SPEED_PRESETS
 from .timeline import MIME_MEDIA, format_tc
 from .docks import CollapsibleSection
 
@@ -317,6 +318,8 @@ class PropertiesPanel(QWidget):
     keyframeToggleRequested = pyqtSignal(float)    # clip-local time: the diamond next to a slider (add here, or remove the one here)
     keyframeSeek = pyqtSignal(float)           # clip-local time: jump the playhead to a keyframe (prev / next / list click)
     animationEdited = pyqtSignal(str, str, float)   # slot ("in" | "out" | "combo"), preset name ("" = none), seconds
+    speedEdited = pyqtSignal(float)            # playback speed multiplier chosen in the Speed section (live while dragging)
+    reverseEdited = pyqtSignal(bool)           # "Play in reverse" switched on / off
 
     # attribute -> (label, lo, hi, default, scale between slider value and attribute)
     SPEC = [
@@ -356,6 +359,7 @@ class PropertiesPanel(QWidget):
         lay.addWidget(self.title)
         lay.addWidget(self.info)
         self._build_text_section(lay)
+        self._build_speed_section(lay)
         self.rows = {}
         self.sec_audio = CollapsibleSection("Audio")
         self.sec_visual = CollapsibleSection("Opacity & colour")
@@ -442,7 +446,8 @@ class PropertiesPanel(QWidget):
             self.keyframeSeek.emit(float(t))
 
     def retint(self):
-        for sec in (self.text_box, self.sec_audio, self.sec_xform, self.sec_visual, self.sec_anim, self.sec_kf):
+        for sec in (self.text_box, self.sec_speed, self.sec_audio, self.sec_xform, self.sec_visual, self.sec_anim,
+                    self.sec_kf):
             sec.retint()
         theme.set_icon(self.b_reset, "reset", 13)
         theme.set_icon(self.b_kf_add, "keyframe", 13)
@@ -461,6 +466,100 @@ class PropertiesPanel(QWidget):
             r, _ = self.rows[attr]
             if r.has_kf:
                 r.set_keyframe_active(bool(kf and attr in kf.values))
+
+    # ── speed / reverse ─────────────────────────────────────────────────────
+    SPEED_DECADE = 100        # slider steps per factor of ten: a log scale, so 0.5x and 2x sit the same distance from 1x
+
+    def _build_speed_section(self, lay):
+        self.sec_speed = CollapsibleSection("Speed")
+        v = self.sec_speed.body_lay
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._speed_slider = QSlider(Qt.Horizontal)
+        self._speed_slider.setRange(int(round(math.log10(MIN_SPEED) * self.SPEED_DECADE)),
+                                    int(round(math.log10(MAX_SPEED) * self.SPEED_DECADE)))
+        self._speed_slider.setToolTip("Playback speed (double-click to reset to 1×)")
+        self._speed_slider.mouseDoubleClickEvent = lambda e: self._speed_chosen(1.0)
+        self._speed_slider.valueChanged.connect(
+            lambda sv: self._speed_chosen(round(10 ** (sv / self.SPEED_DECADE), 2), from_slider=True))
+        self._speed_spin = QDoubleSpinBox()
+        self._speed_spin.setRange(MIN_SPEED, MAX_SPEED)
+        self._speed_spin.setDecimals(2)
+        self._speed_spin.setSingleStep(0.25)
+        self._speed_spin.setSuffix(" ×")
+        self._speed_spin.setKeyboardTracking(False)          # apply on Enter / arrows, not on every typed digit
+        self._speed_spin.setFixedWidth(84)
+        self._speed_spin.valueChanged.connect(lambda x: self._speed_chosen(x, from_spin=True))
+        row.addWidget(self._speed_slider, 1)
+        row.addWidget(self._speed_spin)
+        v.addLayout(row)
+
+        chips = QHBoxLayout()
+        chips.setSpacing(4)
+        self._speed_chips = {}
+        for sp in SPEED_PRESETS:
+            b = QToolButton()
+            b.setText(f"{sp:g}×")
+            b.setCheckable(True)
+            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(28)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(lambda _=False, x=sp: self._speed_chosen(x))
+            chips.addWidget(b)
+            self._speed_chips[sp] = b
+        v.addLayout(chips)
+
+        self._reverse_box = QCheckBox("Play in reverse")
+        self._reverse_box.setToolTip("Play this clip backwards, picture and sound (Alt+R)")
+        self._reverse_box.toggled.connect(lambda on: None if self._loading else self.reverseEdited.emit(bool(on)))
+        v.addWidget(self._reverse_box)
+
+        self._speed_info = QLabel("")
+        self._speed_info.setWordWrap(True)
+        self._speed_info.setStyleSheet(f"color: {theme.T['muted']}; font-size: 9pt;")
+        v.addWidget(self._speed_info)
+        lay.addWidget(self.sec_speed)
+
+    def _speed_chosen(self, speed, from_slider=False, from_spin=False):
+        """A speed was picked by the slider, the box or a chip: mirror it in the other controls, then announce it."""
+        if self._loading:
+            return
+        speed = min(MAX_SPEED, max(MIN_SPEED, float(speed)))
+        self._set_speed_controls(speed, skip_slider=from_slider, skip_spin=from_spin)
+        self.speedEdited.emit(speed)
+
+    def _set_speed_controls(self, speed, skip_slider=False, skip_spin=False):
+        if not skip_slider:
+            self._speed_slider.blockSignals(True)
+            self._speed_slider.setValue(int(round(math.log10(speed) * self.SPEED_DECADE)))
+            self._speed_slider.blockSignals(False)
+        if not skip_spin:
+            self._speed_spin.blockSignals(True)
+            self._speed_spin.setValue(speed)
+            self._speed_spin.blockSignals(False)
+        for sp, b in self._speed_chips.items():
+            b.setChecked(abs(sp - speed) < 1e-3)
+
+    def load_speed(self, clip):
+        """Show the clip's speed / reverse in the Speed section without triggering an edit."""
+        self._loading = True
+        try:
+            sp = clip.speed if clip is not None else 1.0
+            self._set_speed_controls(sp)
+            self._reverse_box.setChecked(bool(clip is not None and clip.reverse))
+        finally:
+            self._loading = False
+        self.refresh_speed_info(clip)
+
+    def refresh_speed_info(self, clip):
+        """Update only the read-out (the controls keep their place while the user is dragging them)."""
+        if clip is None:
+            self._speed_info.setText("")
+            return
+        self._speed_info.setText(f"Plays {clip.span:.2f} s of the source in {clip.duration:.2f} s"
+                                 + (" · backwards" if clip.reverse else ""))
 
     # ── animation (In / Out / Combo, CapCut style) ──────────────────────────
     ANIM_TABS = (("in", "In"), ("out", "Out"), ("combo", "Combo"))
@@ -682,6 +781,10 @@ class PropertiesPanel(QWidget):
         on = clip is not None
         is_title = on and clip.title is not None
         self.text_box.setVisible(is_title)
+        speed_on = on and not is_title and media is not None and media.kind in ("video", "audio")
+        self.sec_speed.setVisible(speed_on)              # photos and titles have no source to speed up or reverse
+        if speed_on:
+            self.load_speed(clip)
         self.sec_audio.setVisible(not is_title)
         self.sec_xform.setVisible(on and not is_title and media is not None and media.kind in ("video", "image"))
         # Keyframe section: only for visual, non-title clips

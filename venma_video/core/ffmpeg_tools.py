@@ -152,6 +152,51 @@ def _n6(x):
     return f"{x:.6f}".rstrip("0").rstrip(".") or "0"
 
 
+def _atempo_chain(speed):
+    """``atempo`` filters that change the audio speed by ``speed`` without changing its pitch.
+
+    One ``atempo`` only takes 0.5..2 on older FFmpeg builds, so bigger / smaller factors are chained."""
+    out, s = [], float(speed)
+    while s > 2.0 + 1e-9:
+        out.append("atempo=2")
+        s /= 2.0
+    while s < 0.5 - 1e-9:
+        out.append("atempo=0.5")
+        s *= 2.0
+    if abs(s - 1.0) > 1e-6:
+        out.append(f"atempo={_n6(s)}")
+    return out
+
+
+def _is_retimed(clip):
+    return clip is not None and (getattr(clip, "reverse", False) or abs(getattr(clip, "speed", 1.0) - 1.0) > 1e-9)
+
+
+REVERSE_CHUNK = 4.0          # export: source seconds reversed per FFmpeg run (``reverse`` buffers a whole run in RAM)
+PREVIEW_REVERSE_CHUNK = 1.0  # preview: timeline seconds decoded (and reversed) at a time
+
+
+def reverse_chunks(clip, s0=0.0, chunk=PREVIEW_REVERSE_CHUNK, fps=None):
+    """How to play a reversed clip from ``s0`` (seconds into the clip) to its end in short pieces.
+
+    FFmpeg's ``reverse`` filter holds everything it is given in memory, so a long clip is cut into ``chunk``
+    timeline-second pieces, last piece of the source first. Yields ``(src_lo, src_hi, frames)``: the source range
+    to decode and, when ``fps`` is given, the exact number of output frames that piece must produce (rounded
+    cumulatively, so the pieces never drift against the clock). """
+    s = min(max(0.0, float(s0)), clip.duration)
+    s_first = s
+    top = clip.in_point + clip.span
+    while s < clip.duration - 1e-6:
+        e = min(clip.duration, s + chunk)
+        hi = top - s * clip.speed
+        lo = top - e * clip.speed
+        n = None
+        if fps:
+            n = int(round((e - s_first) * fps)) - int(round((s - s_first) * fps))
+        yield max(0.0, lo), max(0.0, hi), n
+        s = e
+
+
 def has_keyframes(clip):
     return clip is not None and bool(getattr(clip, "keyframes", None))
 
@@ -298,13 +343,95 @@ def _place(src, dst, W, H, clip, fps, tag, bg="black@0", animate=False):
             f"[bg{tag}][{src}]overlay=x='{px}{off_x}-w/2':y='{py}{off_y}-h/2':format=auto:shortest=1[{dst}]"]
 
 
-def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Medium", text_images=None):
+def _roles(project, c):
+    """(draws a picture, makes sound) for clip ``c``: what the exporter has to render for it."""
+    m = project.media[c.media_id]
+    is_video_track = project.tracks[c.track]["kind"] == "video"
+    draw = is_video_track and m.kind in ("video", "image", "text") and not project.track_hidden(c.track)
+    sound = m.has_audio and m.kind != "image" and not project.track_muted(c.track)
+    return draw, sound
+
+
+def reversed_clips(project):
+    """Clips the export has to play backwards (hidden / muted ones that render nothing are left out)."""
+    return [c for c in project.clips if c.reverse and project.media[c.media_id].kind in ("video", "audio")
+            and any(_roles(project, c))]
+
+
+def render_reversed_media(project, out_dir, chunk=REVERSE_CHUNK, progress=None, cancelled=None):
+    """Pre-render every reversed clip's source window, played backwards, into ``out_dir``.
+
+    FFmpeg's ``reverse`` / ``areverse`` filters keep everything they are given in memory (a minute of 1080p would
+    need many gigabytes), so the window is reversed ``chunk`` source-seconds at a time and the pieces are joined in
+    reverse order without re-encoding. Returns ``{clip id: path}`` for :func:`build_export_command`'s
+    ``reversed_media``. ``progress(fraction)`` and ``cancelled()`` are optional callbacks.
+    """
+    exe = ffmpeg_path()
+    if not exe:
+        raise RuntimeError("ffmpeg not found")
+    jobs = reversed_clips(project)
+    plan = {c.id: [(max(c.in_point, c.in_point + c.span - (k + 1) * chunk), c.in_point + c.span - k * chunk)
+                   for k in range(max(1, int(-(-c.span // chunk))))] for c in jobs}
+    total = sum(len(v) + 1 for v in plan.values()) or 1
+    done = 0
+
+    def step():
+        nonlocal done
+        done += 1
+        if progress:
+            progress(done / total)
+        if cancelled and cancelled():
+            raise RuntimeError("Export cancelled.")
+
+    def run(argv):
+        r = subprocess.run(argv, capture_output=True, text=True, **_NOWIN)
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or "ffmpeg failed").strip().splitlines()[-1])
+
+    out = {}
+    for c in jobs:
+        m = project.media[c.media_id]
+        parts = []
+        for k, (a, b) in enumerate(plan[c.id]):
+            part = os.path.join(out_dir, f"{c.id}_{k:04d}.mkv")
+            argv = [exe, "-y", "-v", "error", "-nostdin", "-ss", _n6(a), "-t", _n6(max(0.05, b - a)), "-i", m.path, "-sn"]
+            if m.kind == "video":
+                argv += ["-vf", "reverse", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", "-pix_fmt", "yuv420p"]
+            else:
+                argv += ["-vn"]
+            argv += ["-af", "areverse", "-c:a", "pcm_s16le"] if m.has_audio else ["-an"]
+            run(argv + [part])
+            parts.append(part)
+            step()
+        final = os.path.join(out_dir, f"{c.id}_reversed.mkv")
+        lst = os.path.join(out_dir, f"{c.id}_parts.txt")
+        with open(lst, "w", encoding="utf-8") as f:
+            for part in parts:                                  # last piece of the source first
+                f.write("file '" + part.replace("\\", "/").replace("'", "'\\''") + "'\n")
+        run([exe, "-y", "-v", "error", "-nostdin", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", final])
+        for part in parts + [lst]:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+        out[c.id] = final
+        step()
+    return out
+
+
+def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Medium", text_images=None,
+                         reversed_media=None):
     """Build the ffmpeg argv that renders the whole timeline. Raises ValueError for an empty timeline.
 
     ``text_images`` maps a title clip's id to a transparent, project-sized PNG of that title (the UI
     renders these with Qt so the export matches the preview exactly and needs no ffmpeg fonts).
+
+    ``reversed_media`` maps a reversed clip's id to its source window already played backwards
+    (:func:`render_reversed_media`). A reversed clip without an entry is reversed inline with the ``reverse``
+    filter, which is fine for short clips but needs the whole clip in memory.
     """
     text_images = text_images or {}
+    reversed_media = reversed_media or {}
     exe = ffmpeg_path()
     if not exe:
         raise RuntimeError("ffmpeg not found")
@@ -320,9 +447,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
     n = 0
     for c in sorted(project.clips, key=lambda c: (-c.track, c.start)):      # lower tracks first
         m = project.media[c.media_id]
-        is_video_track = project.tracks[c.track]["kind"] == "video"
-        draw = is_video_track and m.kind in ("video", "image", "text") and not project.track_hidden(c.track)
-        sound = m.has_audio and m.kind != "image" and not project.track_muted(c.track)
+        draw, sound = _roles(project, c)
         if not draw and not sound:
             continue                                  # hidden picture layer / muted track: nothing to render
         src = m.path
@@ -332,13 +457,19 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
                 raise ValueError("A title has not been rendered to an image for export.")
         if m.kind in ("image", "text"):
             cmd += ["-loop", "1", "-framerate", str(fps), "-t", _num(c.duration), "-i", src]
+        elif c.reverse and c.id in reversed_media:        # already backwards: just read it from the start
+            cmd += ["-t", _num(c.span), "-i", reversed_media[c.id]]
         else:
-            cmd += ["-ss", _num(c.in_point), "-t", _num(c.duration), "-i", m.path]
+            cmd += ["-ss", _num(c.in_point), "-t", _num(c.span), "-i", m.path]
+        inline_reverse = c.reverse and c.id not in reversed_media and m.kind not in ("image", "text")
         i = n
         n += 1
         if draw:
             moved = has_transform(c)
-            chain = [f"fps={fps}"] + _fit(W, H, c)
+            lead = ["reverse"] if inline_reverse else []
+            if abs(c.speed - 1.0) > 1e-9 and m.kind not in ("image", "text"):
+                lead.append(f"setpts=(PTS-STARTPTS)/{_n6(c.speed)}")
+            chain = lead + [f"fps={fps}"] + _fit(W, H, c)
             if not moved:
                 chain.append(f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black@0")
             anim = _anim_filters(c)
@@ -359,8 +490,9 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             vparts.append((i, c))
         if sound:
             delay = int(round(c.start * 1000))
-            filters.append(f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,volume={_num(c.volume)},"
-                           f"adelay={delay}|{delay}[a{i}]")
+            alead = (["areverse"] if inline_reverse else []) + _atempo_chain(c.speed)
+            filters.append(f"[{i}:a]{','.join(alead + ['aresample=48000', 'aformat=channel_layouts=stereo'])},"
+                           f"volume={_num(c.volume)},adelay={delay}|{delay}[a{i}]")
             aparts.append(i)
 
     filters.insert(0, f"color=c=black:s={W}x{H}:r={fps}:d={_num(total)},format=rgba[base]")
@@ -432,13 +564,17 @@ def video_stream_cmd(path, src_start, duration, w, h, fps, clip=None):
             "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
 
 
-def audio_stream_cmd(path, src_start, duration, volume=1.0, rate=48000, channels=2):
-    """ffmpeg argv that writes raw signed 16-bit little-endian PCM to stdout."""
+def audio_stream_cmd(path, src_start, duration, volume=1.0, rate=48000, channels=2, speed=1.0, reverse=False):
+    """ffmpeg argv that writes raw signed 16-bit little-endian PCM to stdout.
+
+    ``src_start`` / ``duration`` are SOURCE seconds; ``speed`` changes the tempo (pitch is kept) and ``reverse``
+    plays that range backwards."""
     exe = ffmpeg_path()
     if not exe:
         raise RuntimeError("ffmpeg not found")
+    af = (["areverse"] if reverse else []) + _atempo_chain(speed) + [f"volume={_num(volume)}"]
     return [exe, "-v", "error", "-nostdin", "-ss", f"{max(0.0, src_start):.3f}", "-t", f"{max(0.05, duration):.3f}",
-            "-i", path, "-vn", "-sn", "-af", f"volume={_num(volume)}",
+            "-i", path, "-vn", "-sn", "-af", ",".join(af),
             "-ac", str(channels), "-ar", str(rate), "-f", "s16le", "-"]
 
 
@@ -456,7 +592,7 @@ def composite_still_cmd(project, t, w, h):
         if m.kind == "image":
             cmd += ["-i", m.path]
         else:
-            src = c.in_point + (t - c.start)
+            src = c.source_time(t - c.start)
             src = min(max(0.0, src), max(0.0, m.duration - 1.0 / max(1, project.fps)))
             cmd += ["-ss", f"{src:.3f}", "-i", m.path]
         moved = has_transform(c)
@@ -507,24 +643,39 @@ def layer_size(media_w, media_h, pw, ph, scale=1.0):
 
 
 def _layer_vf(w, h, fps, clip, alpha):
-    chain = [f"fps={fps}"] if fps else []
+    retime = bool(fps) and _is_retimed(clip)
+    speed = clip.speed if retime else 1.0
+    # a retimed clip is sampled at fps / speed per SOURCE second, then re-stamped at fps per timeline second
+    chain = [f"fps={_n6(fps / speed) if retime else fps}"] if fps else []
     chain += [f"scale={w}:{h}:flags=fast_bilinear", "setsar=1"]
     if clip is not None and (abs(clip.brightness) > 1e-3 or abs(clip.contrast - 1) > 1e-3
                              or abs(clip.saturation - 1) > 1e-3):
         chain.append(f"eq=brightness={_num(clip.brightness)}:contrast={_num(clip.contrast)}"
                      f":saturation={_num(clip.saturation)}")
+    if retime:
+        if clip.reverse:
+            chain += ["reverse", "tpad=stop_mode=clone:stop=4"]
+        # Re-stamp the frames at exactly fps per timeline second. The time base must be set first: setpts stores an
+        # integer in it, and after the sampling fps filter above it is far too coarse (timestamps would collapse).
+        # The closing fps filter makes the stream's frame rate match, or ffmpeg would drop / duplicate frames.
+        chain += [f"settb=1/{fps}", "setpts=N", f"fps={fps}"]
     chain.append("format=rgba" if alpha else "format=rgb24")
     return ",".join(chain)
 
 
-def layer_stream_cmd(path, src_start, duration, w, h, fps, clip=None):
-    """Raw RGB24 frames (w*h*3 bytes each) of ONE video layer at its own fitted size, no padding."""
+def layer_stream_cmd(path, src_start, duration, w, h, fps, clip=None, frames=None):
+    """Raw RGB24 frames (w*h*3 bytes each) of ONE video layer at its own fitted size, no padding.
+
+    ``src_start`` / ``duration`` are SOURCE seconds. The clip's speed and reverse are applied; ``frames`` caps the
+    output at exactly that many frames (used for the pieces of a reversed clip, see :func:`reverse_chunks`)."""
     exe = ffmpeg_path()
     if not exe:
         raise RuntimeError("ffmpeg not found")
-    return [exe, "-v", "error", "-nostdin", "-ss", f"{max(0.0, src_start):.3f}", "-t", f"{max(0.05, duration):.3f}",
-            "-i", path, "-an", "-sn", "-vf", _layer_vf(w, h, fps, clip, False),
-            "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+    cmd = [exe, "-v", "error", "-nostdin", "-ss", f"{max(0.0, src_start):.3f}", "-t", f"{max(0.05, duration):.3f}",
+           "-i", path, "-an", "-sn", "-vf", _layer_vf(w, h, fps, clip, False)]
+    if frames:
+        cmd += ["-frames:v", str(int(frames))]
+    return cmd + ["-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
 
 
 def layer_still_cmd(path, kind, src, w, h, clip=None):

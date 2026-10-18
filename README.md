@@ -38,6 +38,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 - **Editing**: move (also between tracks), trim by dragging clip edges, **Ripple Edit tool** (trim an edge and later clips on the track follow, so no gap is left), **Slip tool** (change which part of the source plays without moving or resizing the clip), split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, undo/redo (100 steps).
 - **Text & titles**: add a Title, Lower third or Subtitle at the playhead (`Insert` menu, the **Text** toolbar button, or `Ctrl+T`). Titles are ordinary clips on the top video track, so they move, trim, split, ripple and undo like everything else. Edit the text, font, size, bold/italic, alignment, colour, outline, background box, opacity and X/Y position in the Properties panel; they show live in the preview.
 - **Voiceover**: record from the microphone straight onto an audio track (`Ctrl+R`, the **Record** button in the timeline toolbar, or `Insert > Record Voiceover`). Pick the microphone, optionally count in 3-2-1, and the project plays (muted by default, so the speakers don't leak into the take) while you talk; a red take with a live level trace grows on the audio track from the playhead. **Stop** adds it as a normal clip (move, trim, split, volume, undo all work; one undo step removes the whole take). It goes on the first free audio track, or a new one if that would overlap something. Takes are saved as `Voiceover N.wav` in a `Voiceovers` folder next to your saved project (or the app's data folder until the project is saved). No FFmpeg or codec packs needed, and nothing is recorded until you press Record.
+- **Speed & reverse**: select a video or audio clip and open **Speed** in the Properties panel: a slider (0.1×–20×), an exact-value box, one-click presets (0.25× … 8×) and **Play in reverse**. Also in `Menu > Clip` (`Alt+R` reverses). Faster clips get shorter and slower ones longer (later clips on the track are pushed along only as far as needed), sound follows the speed with its pitch kept, keyframes stretch with the clip, and trim / split / slip / ripple all understand speed and direction. A badge such as `2×` or `◀ 0.5×` marks retimed clips on the timeline. Export reverses long clips in short pieces, so memory stays flat.
 - **Clip properties**: volume (0–200 %), opacity, brightness, contrast, saturation.
 - **Preview**: program monitor with transport (play/pause, frame step, start/end) and timecode. Decoded by FFmpeg in background QThreads (no QtMultimedia video / codec packs needed), so it never shows a black screen; sound plays through QAudioOutput.
 - **Export**: MP4 (H.264 + AAC) or WebM (VP9 + Opus), quality High/Medium/Low, at the project resolution and frame rate. Layers are composited by track order with opacity; all audio is mixed.
@@ -50,6 +51,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 | `Space` | Play / pause |
 | `Left` / `Right` | Previous / next frame |
 | `Home` / `End` | Go to start / end |
+| `Alt+R` | Reverse the selected clip |
 | `S` or `Ctrl+K` | Split at playhead (selected clip, else every clip under the playhead) |
 | `Delete` / `Shift+Delete` | Delete / ripple delete |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
@@ -71,7 +73,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 - Voiceover recording needs QtMultimedia too (it is part of the PyQt5 wheel) and an input device; on macOS and Windows the
   system may ask you to allow microphone access the first time.
 - Preview audio needs QtMultimedia (PyQt5 wheel includes it). Without an audio device the preview plays silently.
-- No transitions, speed changes, keyframes, or audio waveforms yet. Titles have no animation or fades yet, and
+- No transitions, speed ramps (one constant speed per clip), or audio waveforms yet. Titles have no animation or fades yet, and
   a title's position is set with sliders (no on-canvas dragging yet).
 - The preview decodes at reduced size (max 960 px, 30 fps) so 4K sources stay smooth; export is always full quality.
 

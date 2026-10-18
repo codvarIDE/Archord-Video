@@ -83,6 +83,30 @@ the export, which builds the same curve as an FFmpeg expression).
   picture being fitted at its biggest keyframe scale so zooming in stays sharp; opacity uses `geq` (slower) only when
   it really changes. `tests/test_keyframes.py` renders these with the real FFmpeg and checks pixels.
 
+## Speed and reverse
+
+`Clip.speed` (0.1–20) and `Clip.reverse` are saved only when non-default and are deliberately *not* in `CLIP_DEFAULTS`
+("Reset effects" must never change a clip's length). `Clip.duration` stays the **timeline** length; the clip plays
+`Clip.span = duration * speed` seconds of source, the window `[in_point, in_point + span]`, forwards or backwards.
+`Clip.source_time(t)` is the single mapping from clip time to source time (preview stills, composites).
+
+- **Model.** `Project.set_speed` keeps the source window, rescales length and keyframes and pushes later clips on the
+  track just far enough to avoid overlap; speed is capped so a clip never drops below `MIN_CLIP`. `set_reverse` only
+  flips the flag. Trim, ripple, slip and split all go through `_source_room` / `_trim_head` / `_trim_tail`: a reversed
+  clip's *head* is the end of its source window and its *tail* the start, so they move `in_point` the other way round.
+- **Export.** Video: `setpts=(PTS-STARTPTS)/speed` then `fps`; audio: chained `atempo` (each stage within 0.5–2).
+  FFmpeg's `reverse` / `areverse` buffer everything in RAM, so `render_reversed_media` reverses the window in
+  `REVERSE_CHUNK`-second pieces and joins them in reverse order (`-c copy`); `build_export_command(reversed_media=...)`
+  then reads that file. Without it a reversed clip falls back to the inline filters (fine for short clips).
+  `ExportWorker(prepare=...)` runs this step inside the thread, with progress and cancel.
+- **Preview.** Streams sample the source at `fps / speed` and re-stamp with `settb=1/fps,setpts=N,fps=fps` (the
+  time base must be set first or the timestamps collapse). Reversed clips play as a chain of 1 s pieces
+  (`ffmpeg_tools.reverse_chunks`, which also gives each piece an exact frame count so the clock never drifts);
+  `_Stream` accepts a function yielding several commands for this. Stream keys include speed / reverse.
+- **UI.** `PropertiesPanel` Speed section (log slider, box, chips, reverse switch), `MainWindow._apply_speed` /
+  `reverse_selected`, a `Clip` menu, and a badge in `TimelineCanvas._draw_clip`.
+- **Tests.** `tests/test_speed.py` renders a red/green/blue/yellow source and checks which colour shows when.
+
 ## Layers and the preview
 
 - **Stacking order.** In a typed project every picture layer (video / photo / text clips) is ordered by when it

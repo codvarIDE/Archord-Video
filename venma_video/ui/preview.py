@@ -343,31 +343,46 @@ class _Stream(QThread):
         self._count = 0
 
     # worker thread ---------------------------------------------------------------------------
+    def _commands(self):
+        """The ffmpeg command(s) to run one after the other. ``cmd`` is one argv, or a function returning an
+        iterator of argvs (a reversed clip is decoded in short pieces, last piece first, so FFmpeg's ``reverse``
+        filter never has to hold the whole clip in memory)."""
+        if callable(self.cmd):
+            yield from self.cmd()
+        else:
+            yield self.cmd
+
     def run(self):
         err = tempfile.TemporaryFile()
         got_any = False
         try:
-            self._proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=err,
-                                          stdin=subprocess.DEVNULL, bufsize=1 << 20, **_NOWIN)
-            rd = self._proc.stdout
-            while not self._stop:
-                buf = rd.read(self.chunk)
-                if not buf:
+            for cmd in self._commands():
+                if self._stop:
                     break
-                if len(buf) < self.chunk:
-                    if not self._partial_ok:
-                        break
-                    buf = buf[:len(buf) - len(buf) % 4]
+                self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err,
+                                              stdin=subprocess.DEVNULL, bufsize=1 << 20, **_NOWIN)
+                rd = self._proc.stdout
+                while not self._stop:
+                    buf = rd.read(self.chunk)
                     if not buf:
                         break
-                got_any = True
-                with self._cv:
-                    while len(self._q) >= self.max_items and not self._stop:
-                        self._cv.wait(0.05)
-                    if self._stop:
-                        break
-                    self._q.append((self._count, buf))
-                    self._count += 1
+                    if len(buf) < self.chunk:
+                        if not self._partial_ok:
+                            break
+                        buf = buf[:len(buf) - len(buf) % 4]
+                        if not buf:
+                            break
+                    got_any = True
+                    with self._cv:
+                        while len(self._q) >= self.max_items and not self._stop:
+                            self._cv.wait(0.05)
+                        if self._stop:
+                            break
+                        self._q.append((self._count, buf))
+                        self._count += 1
+                if self._proc.poll() is None:              # this piece is done: reap it before starting the next
+                    self._proc.kill()
+                self._proc.wait(2)
         except Exception as e:
             self.failed.emit(f"Preview: {e}")
         finally:
@@ -720,18 +735,26 @@ class PreviewEngine(QObject):
     def _vkey(self, c):
         m = self.project.media[c.media_id]
         return (c.id, m.path, round(c.start, 4), round(c.in_point, 4), round(c.duration, 4),
+                round(c.speed, 4), c.reverse,
                 round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3),
                 self._lsize(c), self._pfps)
 
     def _akey(self, c):
         m = self.project.media[c.media_id]
         return (c.id, m.path, round(c.start, 4), round(c.in_point, 4), round(c.duration, 4),
-                round(c.volume, 3), self._rate, self._ch)
+                round(c.speed, 4), c.reverse, round(c.volume, 3), self._rate, self._ch)
 
     def _start_video(self, c, t0):
         m = self.project.media[c.media_id]
         w, h = self._lsize(c)
-        cmd = ft.layer_stream_cmd(m.path, c.in_point + (t0 - c.start), c.end - t0, w, h, self._pfps, c)
+        fps, s0 = self._pfps, max(0.0, t0 - c.start)           # s0: seconds into the clip where playback starts
+        if c.reverse:
+            def cmd():                                          # one short piece at a time, last part of the source first
+                for lo, hi, n in ft.reverse_chunks(c, s0, ft.PREVIEW_REVERSE_CHUNK, fps):
+                    if n:
+                        yield ft.layer_stream_cmd(m.path, lo, hi - lo, w, h, fps, c, frames=n)
+        else:
+            cmd = ft.layer_stream_cmd(m.path, c.source_time(s0), (c.duration - s0) * c.speed, w, h, fps, c)
         s = _VideoStream(cmd, w, h, self._pfps, self._vkey(c), t0, c.end, self)
         s.failed.connect(self.message)
         s.start()
@@ -739,8 +762,14 @@ class PreviewEngine(QObject):
 
     def _start_audio(self, c, t0):
         m = self.project.media[c.media_id]
-        cmd = ft.audio_stream_cmd(m.path, c.in_point + (t0 - c.start), c.end - t0, c.volume,
-                                  self._rate, self._ch)
+        rate, ch, s0 = self._rate, self._ch, max(0.0, t0 - c.start)
+        if c.reverse:
+            def cmd():
+                for lo, hi, _ in ft.reverse_chunks(c, s0, 2.0):
+                    yield ft.audio_stream_cmd(m.path, lo, hi - lo, c.volume, rate, ch, speed=c.speed, reverse=True)
+        else:
+            cmd = ft.audio_stream_cmd(m.path, c.source_time(s0), (c.duration - s0) * c.speed, c.volume,
+                                      rate, ch, speed=c.speed)
         s = _AudioStream(cmd, self._akey(c), t0, c.end, self)
         s.failed.connect(self.message)
         s.start()
@@ -899,7 +928,7 @@ class PreviewEngine(QObject):
         if m.kind == "image":
             src = 0.0
         else:
-            src = c.in_point + (t - c.start)
+            src = c.source_time(t - c.start)
             src = min(max(0.0, src), max(0.0, m.duration - 1.0 / max(1, p.fps)))
         return ("L", m.path, round(src * p.fps), w, h, m.kind == "image",
                 round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3)), src

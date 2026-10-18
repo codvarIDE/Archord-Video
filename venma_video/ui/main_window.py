@@ -16,7 +16,7 @@ from . import theme
 from ..core import ffmpeg_tools as ft
 from ..core import animation as anim_core
 from ..core import voiceover as vo_core
-from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS
+from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS, SPEED_PRESETS, MIN_CLIP
 from .timeline import TimelineWidget, format_tc
 from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
 from .titles import render_project_titles
@@ -45,7 +45,8 @@ class MainWindow(QMainWindow):
         self._live_timer = QTimer(self, singleShot=True, interval=35)
         self._live_timer.timeout.connect(lambda: self.engine.refresh())
         self._edit_timer = QTimer(self, singleShot=True, interval=500)
-        self._edit_timer.timeout.connect(lambda: self.commit("Edit Clip"))
+        self._edit_label = "Edit Clip"                           # undo label the pending edit will get (e.g. "Change Speed")
+        self._edit_timer.timeout.connect(lambda: self.commit(self._edit_label))
         self._anim_stop = QTimer(self, singleShot=True)           # ends the short preview played after picking an animation
         self._anim_stop.timeout.connect(self._stop_animation_preview)
 
@@ -104,6 +105,9 @@ class MainWindow(QMainWindow):
         self.a_split2 = A("Split at Playhead (alt)", self.split_at_playhead, "Ctrl+K")
         self.a_delete = A("&Delete Clip", lambda: self.delete_selected(False), "Delete", "trash")
         self.a_ripple = A("&Ripple Delete", lambda: self.delete_selected(True), "Shift+Delete", "ripple_delete")
+        self.a_reverse = A("&Reverse Clip", self.reverse_selected, "Alt+R")
+        self.a_speed = {sp: A(f"{sp:g}×" + ("  (normal)" if sp == 1.0 else ""), lambda sp=sp: self._apply_speed(sp, live=False))
+                        for sp in SPEED_PRESETS}
         self.a_keyframe = A("Add / Remove &Keyframe", self.add_keyframe_at_playhead, "Alt+K", "keyframe")
         self.a_kf_prev = A("Previous Keyframe", lambda: self._goto_keyframe(-1), "Alt+Left")
         self.a_kf_next = A("Next Keyframe", lambda: self._goto_keyframe(1), "Alt+Right")
@@ -233,6 +237,11 @@ class MainWindow(QMainWindow):
             sub = menu.addMenu(title)
             for a in items:
                 sub.addSeparator() if a is None else sub.addAction(a)
+        clip_menu = menu.addMenu("Clip")
+        clip_menu.addAction(self.a_reverse)
+        speed_menu = clip_menu.addMenu("Speed")
+        for a in self.a_speed.values():
+            speed_menu.addAction(a)
         self.b_menu.setMenu(menu)
         row.addWidget(self.b_menu)
 
@@ -452,6 +461,8 @@ class MainWindow(QMainWindow):
         c.keyframeMoved.connect(self._on_keyframe_moved)
         c.keyframeDeleteRequested.connect(self._on_keyframe_delete)
         self.props.animationEdited.connect(self._on_animation)
+        self.props.speedEdited.connect(lambda v: self._apply_speed(v, live=True))
+        self.props.reverseEdited.connect(self._on_reverse)
 
     # ── environment ──────────────────────────────────────────────────────────
     def _check_environment(self):
@@ -482,6 +493,7 @@ class MainWindow(QMainWindow):
             del self.labels[1]
         self.index = len(self.history) - 1
         self.dirty = True
+        self._edit_label = "Edit Clip"
         self._refresh_all()
 
     def _restore(self, index):
@@ -931,6 +943,62 @@ class MainWindow(QMainWindow):
         if kf is not None:
             self._seek_to_keyframe(kf.t, sid)
 
+    # ── speed / reverse ──────────────────────────────────────────────────────
+    def _retime_target(self):
+        """The selected clip if its speed / direction may change, else None (with a message saying why)."""
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if c is None:
+            self.statusBar().showMessage("Select a clip first.", 3000)
+            return None
+        if self._refuse_locked(sid):
+            self._update_clip_panel()                    # put the controls back
+            return None
+        if not self.project.can_retime(sid):
+            self.statusBar().showMessage("Photos and titles have no source to speed up or reverse: "
+                                         "just trim them to the length you want.", 4000)
+            return None
+        return c
+
+    def _apply_speed(self, value, live):
+        """Change the selected clip's speed. ``live`` is the slider being dragged: the result shows at once and the
+        undo step is recorded when the drag settles; otherwise (menu, chip) it is one undo step right away."""
+        c = self._retime_target()
+        if c is None:
+            return
+        top = self.project.max_speed(c.id)
+        changed = self.project.set_speed(c.id, value)
+        clamped = value > top + 1e-6
+        if changed and live:
+            self.dirty = True
+            self.timeline.canvas.set_project(self.project)
+            self._update_labels()
+            self.engine.refresh()
+            self.props.refresh_speed_info(c)
+            self._edit_label = "Change Speed"
+            self._edit_timer.start()
+        elif changed:
+            self.commit("Change Speed")
+        if clamped:
+            self.statusBar().showMessage(f"This clip can't go faster than {top:g}×: it would be shorter than "
+                                         f"{MIN_CLIP:g} s.", 5000)
+        if clamped or not changed:
+            self._update_clip_panel()                    # show the speed the clip really has
+
+    def reverse_selected(self):
+        c = self._retime_target()
+        if c is not None:
+            self._on_reverse(not c.reverse)
+
+    def _on_reverse(self, flag):
+        c = self._retime_target()
+        if c is None:
+            return
+        if self.project.set_reverse(c.id, flag):
+            self.commit("Reverse Clip" if flag else "Play Clip Forward")
+        else:
+            self._update_clip_panel()
+
     # ── In / Out / Combo animations ──────────────────────────────────────────
     def _on_animation(self, slot, name, seconds):
         """The Animation panel picked a preset (or "" = none) or moved the duration slider."""
@@ -1166,7 +1234,18 @@ class MainWindow(QMainWindow):
             if any(c.title is not None for c in p.clips):
                 title_dir = tempfile.mkdtemp(prefix="venma_titles_")       # one transparent PNG per title
                 text_images = render_project_titles(p, title_dir)
-            cmd = ft.build_export_command(p, out, fmt, quality, text_images=text_images)
+            rev_dir, prepare = None, None
+            if ft.reversed_clips(p):
+                # FFmpeg's reverse filter holds a whole clip in memory, so reversed clips are rendered backwards in
+                # short pieces first (inside the worker, with progress), and the export command is built after that.
+                rev_dir = tempfile.mkdtemp(prefix="venma_rev_")
+
+                def prepare(progress, cancelled, p=p, out=out, fmt=fmt, quality=quality, ti=text_images, d=rev_dir):
+                    rev = ft.render_reversed_media(p, d, progress=progress, cancelled=cancelled)
+                    return ft.build_export_command(p, out, fmt, quality, text_images=ti, reversed_media=rev)
+                cmd = None
+            else:
+                cmd = ft.build_export_command(p, out, fmt, quality, text_images=text_images)
         except Exception as e:
             if title_dir:
                 shutil.rmtree(title_dir, ignore_errors=True)
@@ -1178,14 +1257,17 @@ class MainWindow(QMainWindow):
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
-        w = ExportWorker(cmd, p.duration(), self)
+        w = ExportWorker(cmd, p.duration(), self, prepare=prepare)
         w.progress.connect(lambda f: dlg.setValue(int(f * 1000)))
+        w.status.connect(dlg.setLabelText)
         dlg.canceled.connect(w.cancel)
 
         def done(ok, msg):
             dlg.close()
             if title_dir:
                 shutil.rmtree(title_dir, ignore_errors=True)
+            if rev_dir:
+                shutil.rmtree(rev_dir, ignore_errors=True)
             if ok:
                 QMessageBox.information(self, "Export", f"Saved to\n{out}")
             elif "cancel" not in msg.lower():

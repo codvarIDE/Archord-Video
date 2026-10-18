@@ -49,16 +49,25 @@ class MediaWorker(QThread):
 
 
 class ExportWorker(QThread):
-    """Run an ffmpeg export command and report progress (0..1)."""
+    """Run an ffmpeg export command and report progress (0..1).
+
+    ``prepare`` is optional: a function ``prepare(progress, cancelled) -> argv`` run first, inside the thread, for
+    work the command depends on (reversed clips are rendered backwards, then the command is built). Its progress fills
+    the first quarter of the bar, the export itself the rest."""
     progress = pyqtSignal(float)
+    status = pyqtSignal(str)                # what the dialog should say ("Preparing reversed clips…" / "Rendering…")
     finished_ok = pyqtSignal(bool, str)     # (success, message)
 
-    def __init__(self, cmd, total_seconds, parent=None):
+    PREP_SHARE = 0.25
+
+    def __init__(self, cmd, total_seconds, parent=None, prepare=None):
         super().__init__(parent)
         self.cmd = cmd
+        self.prepare = prepare
         self.total = max(0.001, float(total_seconds))
         self._proc = None
         self._cancel = False
+        self._base, self._scale = 0.0, 1.0
 
     def cancel(self):
         self._cancel = True
@@ -68,6 +77,14 @@ class ExportWorker(QThread):
     def run(self):
         err = tempfile.TemporaryFile()
         try:
+            if self.prepare is not None:
+                self.status.emit("Preparing reversed clips…")
+                self.cmd = self.prepare(lambda f: self.progress.emit(self.PREP_SHARE * min(1.0, f)), lambda: self._cancel)
+                self.status.emit("Rendering…")
+                self._base, self._scale = self.PREP_SHARE, 1.0 - self.PREP_SHARE
+            if self._cancel:
+                self.finished_ok.emit(False, "Export cancelled.")
+                return
             kw = {"creationflags": 0x08000000} if hasattr(subprocess, "CREATE_NO_WINDOW") else {}
             self._proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=err,
                                           stdin=subprocess.DEVNULL, text=True, **kw)
@@ -75,7 +92,8 @@ class ExportWorker(QThread):
                 key, _, val = line.strip().partition("=")
                 if key in ("out_time_us", "out_time_ms"):      # ffmpeg reports microseconds in both
                     try:
-                        self.progress.emit(min(1.0, max(0.0, int(val) / 1e6 / self.total)))
+                        frac = min(1.0, max(0.0, int(val) / 1e6 / self.total))
+                        self.progress.emit(self._base + self._scale * frac)
                     except ValueError:
                         pass
             rc = self._proc.wait()

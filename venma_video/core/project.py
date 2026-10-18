@@ -77,6 +77,22 @@ PRESETS = [
 CLIP_DEFAULTS = dict(volume=1.0, opacity=1.0, brightness=0.0, contrast=1.0, saturation=1.0,
                      scale=1.0, pos_x=0.5, pos_y=0.5, rotation=0.0)
 
+# Playback speed (CapCut style). ``Clip.duration`` is always the length ON THE TIMELINE, so a clip at speed s
+# consumes ``duration * s`` seconds of its source. ``reverse`` plays that source window backwards.
+# Both only make sense for clips that have a source range (video / audio), never for photos or titles.
+MIN_SPEED = 0.1
+MAX_SPEED = 20.0
+SPEED_PRESETS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+
+
+def clamp_speed(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(MAX_SPEED, max(MIN_SPEED, v))
+
+
 # Properties that can be keyframed (animated over time within a clip).
 KEYFRAMED_PROPS = ("pos_x", "pos_y", "scale", "rotation", "opacity")
 # Two keyframes closer than this (seconds) are "the same spot": the playhead counts as standing ON a keyframe
@@ -141,10 +157,30 @@ class Clip:
                                  for k in kf_list], key=lambda k: k.t)
         # CapCut-style In / Out / Combo animation preset(s), layered on top of the clip's own transform.
         self.animation = animation.clean(props.get("animation"))
+        # Speed / reverse (not in CLIP_DEFAULTS: "Reset effects" must never change the clip's length).
+        self.speed = clamp_speed(props.get("speed", 1.0))
+        self.reverse = bool(props.get("reverse", False))
 
     @property
     def end(self):
         return self.start + self.duration
+
+    # ── speed / reverse ─────────────────────────────────────────────────────
+    @property
+    def span(self):
+        """Seconds of SOURCE this clip plays: ``duration * speed``."""
+        return self.duration * self.speed
+
+    def retimed(self):
+        """True when the clip plays at another speed than 1x or backwards."""
+        return self.reverse or abs(self.speed - 1.0) > 1e-9
+
+    def source_time(self, t_clip):
+        """Source-file time (seconds) shown ``t_clip`` seconds into the clip, honouring speed and reverse."""
+        t_clip = min(max(0.0, float(t_clip)), self.duration)
+        if self.reverse:
+            return self.in_point + self.span - t_clip * self.speed
+        return self.in_point + t_clip * self.speed
 
     def to_dict(self):
         d = dict(id=self.id, media_id=self.media_id, track=self.track, start=self.start,
@@ -156,6 +192,10 @@ class Clip:
             d["keyframes"] = [kf.to_dict() for kf in self.keyframes]
         if self.animation:
             d["animation"] = dict(self.animation)
+        if abs(self.speed - 1.0) > 1e-9:               # old project files simply don't have these keys
+            d["speed"] = self.speed
+        if self.reverse:
+            d["reverse"] = True
         return d
 
     @staticmethod
@@ -814,9 +854,15 @@ class Project:
         if c is None or self.track_locked(c.track) or not (c.start + MIN_CLIP <= t <= c.end - MIN_CLIP):
             return None
         split_local = t - c.start   # clip-local time of the split
-        right = Clip(self._new_id("c"), c.media_id, c.track, t, c.in_point + (t - c.start), c.end - t,
-                     title=None if c.title is None else dict(c.title),
+        if c.reverse:
+            # plays backwards: the LEFT half shows the later part of the source window, the right half the earlier
+            right_in, c_in = c.in_point, c.in_point + (c.end - t) * c.speed
+        else:
+            right_in, c_in = c.in_point + (t - c.start) * c.speed, c.in_point
+        right = Clip(self._new_id("c"), c.media_id, c.track, t, right_in, c.end - t,
+                     title=None if c.title is None else dict(c.title), speed=c.speed, reverse=c.reverse,
                      **{k: getattr(c, k) for k in CLIP_DEFAULTS})
+        c.in_point = c_in
         # Distribute keyframes: left keeps those before the cut, right gets those at/after (offset adjusted)
         # (like CapCut, both halves get a keyframe on the cut holding the value the motion had there, so the
         # picture doesn't jump and each half keeps animating up to / from the cut)
@@ -833,17 +879,62 @@ class Project:
         self.clips.append(right)
         return right
 
+    # ── speed / reverse ──
+    def can_retime(self, clip_id):
+        """True for clips that have a source range (video / audio); photos and titles have nothing to speed up."""
+        c = self.clip(clip_id)
+        return c is not None and self.media[c.media_id].kind not in STILL_KINDS
+
+    def max_speed(self, clip_id):
+        """Fastest speed the clip can take: it may not get shorter than MIN_CLIP on the timeline."""
+        c = self.clip(clip_id)
+        return max(MIN_SPEED, min(MAX_SPEED, c.span / MIN_CLIP)) if c is not None else MAX_SPEED
+
+    def set_speed(self, clip_id, speed):
+        """Play the clip at ``speed`` x. The part of the source it plays stays the same, so the clip gets shorter
+        when sped up and longer when slowed down; its keyframes stretch with it. Later clips on the same track are
+        pushed along only as far as needed to make room. Returns True if anything changed."""
+        c = self.clip(clip_id)
+        if c is None or self.track_locked(c.track) or not self.can_retime(clip_id):
+            return False
+        new = min(clamp_speed(speed), self.max_speed(clip_id))
+        if abs(new - c.speed) < 1e-9:
+            return False
+        span, old_dur = c.span, c.duration
+        c.speed = new
+        c.duration = span / new
+        if c.keyframes and old_dur > 1e-9:
+            k = c.duration / old_dur
+            for kf in c.keyframes:
+                kf.t *= k
+        later = [o for o in self.track_clips(c.track, clip_id) if o.start >= c.start + old_dur - 1e-9]
+        if later and c.end > later[0].start + 1e-9:
+            push = c.end - later[0].start
+            for o in later:
+                o.start += push
+        return True
+
+    def set_reverse(self, clip_id, flag):
+        """Play the clip backwards (or forwards again). Length and source window are unchanged."""
+        c = self.clip(clip_id)
+        if c is None or self.track_locked(c.track) or not self.can_retime(clip_id):
+            return False
+        flag = bool(flag)
+        if c.reverse == flag:
+            return False
+        c.reverse = flag
+        return True
+
     def trim_limits(self, clip_id):
         """(earliest start, latest end) the clip's edges may reach given media length and neighbours."""
         c = self.clip(clip_id)
         m = self.media[c.media_id]
-        left_room = c.start if m.kind in STILL_KINDS else min(c.start, c.in_point)
-        earliest = c.start - left_room
-        latest = c.end if m.kind in STILL_KINDS else c.end
-        if m.kind not in STILL_KINDS:
-            latest = c.start + (m.duration - c.in_point)
+        if m.kind in STILL_KINDS:
+            earliest, latest = 0.0, float("inf")
         else:
-            latest = float("inf")
+            head, tail = self._source_room(c, m)
+            earliest = c.start - min(c.start, head)
+            latest = c.end + tail
         for o in self.track_clips(c.track, clip_id):
             if o.end <= c.start + 1e-9:
                 earliest = max(earliest, o.end)
@@ -851,15 +942,39 @@ class Project:
                 latest = min(latest, o.start)
         return earliest, latest
 
+    @staticmethod
+    def _source_room(c, m):
+        """(head, tail): how many TIMELINE seconds the clip's left / right edge can still be pulled outwards
+        before it runs out of source. Speed stretches them (a 2x clip eats source twice as fast); a reversed
+        clip reads its source backwards, so its head grows into the source that comes AFTER the window and
+        its tail into the source that comes BEFORE it."""
+        before = max(0.0, c.in_point)
+        after = max(0.0, m.duration - (c.in_point + c.span))
+        if c.reverse:
+            return after / c.speed, before / c.speed
+        return before / c.speed, after / c.speed
+
+    def _trim_head(self, c, m, delta):
+        """The clip's start moves by ``delta`` timeline seconds (>0 trims, <0 extends): fix in-point and length."""
+        if m.kind not in STILL_KINDS and not c.reverse:
+            c.in_point = max(0.0, c.in_point + delta * c.speed)
+        c.duration -= delta
+
+    def _trim_tail(self, c, m, new_duration):
+        """The clip's length becomes ``new_duration``; a reversed clip's tail is the START of its source window."""
+        if m.kind not in STILL_KINDS and c.reverse:
+            c.in_point = max(0.0, c.in_point + (c.duration - new_duration) * c.speed)
+        c.duration = new_duration
+
     def trim_left(self, clip_id, new_start):
         c = self.clip(clip_id)
         if self.track_locked(c.track):
             return
+        m = self.media[c.media_id]
         lo, _ = self.trim_limits(clip_id)
         new_start = min(max(new_start, lo), c.end - MIN_CLIP)
         delta = new_start - c.start
-        c.in_point += delta
-        c.duration -= delta
+        self._trim_head(c, m, delta)
         c.start = new_start
         c.rebase_keyframes(delta, c.duration)
 
@@ -867,9 +982,10 @@ class Project:
         c = self.clip(clip_id)
         if self.track_locked(c.track):
             return
+        m = self.media[c.media_id]
         _, hi = self.trim_limits(clip_id)
         new_end = max(min(new_end, hi), c.start + MIN_CLIP)
-        c.duration = new_end - c.start
+        self._trim_tail(c, m, new_end - c.start)
         c.rebase_keyframes(0.0, c.duration)
 
     # ── ripple trim ──
@@ -881,10 +997,11 @@ class Project:
         """
         c = self.clip(clip_id)
         m = self.media[c.media_id]
+        head, tail = (0.0, 0.0) if m.kind in STILL_KINDS else self._source_room(c, m)
         if side == "left":
-            lo = float("-inf") if m.kind in STILL_KINDS else c.start - c.in_point
+            lo = float("-inf") if m.kind in STILL_KINDS else c.start - head
             return lo, c.end - MIN_CLIP
-        hi = float("inf") if m.kind in STILL_KINDS else c.start + (m.duration - c.in_point)
+        hi = float("inf") if m.kind in STILL_KINDS else c.end + tail
         return c.start + MIN_CLIP, hi
 
     def ripple_trim(self, clip_id, side, edge):
@@ -906,16 +1023,14 @@ class Project:
             delta = edge - c.start               # >0 trims the head, <0 extends it
             if abs(delta) < 1e-9:
                 return 0.0
-            if m.kind not in STILL_KINDS:
-                c.in_point += delta
-            c.duration -= delta
+            self._trim_head(c, m, delta)
             c.rebase_keyframes(delta, c.duration)
             shift = -delta
         else:
             shift = edge - old_end
             if abs(shift) < 1e-9:
                 return 0.0
-            c.duration = edge - c.start
+            self._trim_tail(c, m, edge - c.start)
             c.rebase_keyframes(0.0, c.duration)
         for o in later:
             o.start = max(0.0, o.start + shift)
@@ -928,7 +1043,7 @@ class Project:
         m = self.media[c.media_id]
         if m.kind in STILL_KINDS:
             return 0.0, 0.0
-        return 0.0, max(0.0, m.duration - c.duration)
+        return 0.0, max(0.0, m.duration - c.span)
 
     def slip(self, clip_id, in_point):
         """Change which part of the source plays without moving the clip or changing its length.
