@@ -124,6 +124,91 @@ FORMATS = {
 }
 
 
+# ── GPU (hardware) H.264 encoding ────────────────────────────────────────────────────────────────
+# name -> (label, function(crf) -> video args). Only MP4 can use these (WebM / VP9 stays on the CPU).
+GPU_ENCODERS = {
+    "h264_nvenc": ("NVIDIA NVENC", lambda q: ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(q),
+                                              "-b:v", "0", "-pix_fmt", "yuv420p"]),
+    "h264_qsv": ("Intel Quick Sync", lambda q: ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", str(q),
+                                                "-pix_fmt", "nv12"]),
+    "h264_amf": ("AMD AMF", lambda q: ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", str(q),
+                                       "-qp_p", str(q), "-qp_b", str(q), "-pix_fmt", "yuv420p"]),
+    "h264_videotoolbox": ("Apple VideoToolbox", lambda q: ["-c:v", "h264_videotoolbox",
+                                                           "-q:v", str(max(30, min(90, int(110 - q * 2.5)))),
+                                                           "-pix_fmt", "yuv420p"]),
+}
+_GPU_CACHE = {}
+
+
+def gpu_encoder(refresh=False):
+    """Name of the first hardware H.264 encoder that really works on this machine, or None.
+
+    Being listed by ``ffmpeg -encoders`` isn't enough (a build can list NVENC on a PC without an NVIDIA card), so
+    each candidate is test-encoded for a few frames. The answer is cached."""
+    if "enc" in _GPU_CACHE and not refresh:
+        return _GPU_CACHE["enc"]
+    found = None
+    exe = ffmpeg_path()
+    if exe:
+        try:
+            listed = subprocess.run([exe, "-hide_banner", "-encoders"], capture_output=True, text=True,
+                                    timeout=15, **_NOWIN).stdout
+        except Exception:
+            listed = ""
+        for name in GPU_ENCODERS:
+            if name not in listed:
+                continue
+            try:
+                r = subprocess.run([exe, "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                                    "color=c=black:s=256x256:r=30:d=0.2", *GPU_ENCODERS[name][1](23),
+                                    "-f", "null", "-"], capture_output=True, timeout=20, **_NOWIN)
+            except Exception:
+                continue
+            if r.returncode == 0:
+                found = name
+                break
+    _GPU_CACHE["enc"] = found
+    return found
+
+
+def gpu_label(name=None):
+    name = name or gpu_encoder()
+    return GPU_ENCODERS[name][0] if name in GPU_ENCODERS else ""
+
+
+def _video_args(spec, quality, gpu):
+    """(ffmpeg video-codec args, whether the quality ``-crf`` flag is still needed)."""
+    if gpu and gpu in GPU_ENCODERS and spec["ext"] == ".mp4":
+        return GPU_ENCODERS[gpu][1](QUALITY[quality]), False
+    return spec["v"], spec["crf"]
+
+
+# ── canvas background ────────────────────────────────────────────────────────────────────────────
+def bg_color_arg(project):
+    """The project's fill colour as an FFmpeg colour (``0xRRGGBB``)."""
+    return "0x" + getattr(project, "bg_color", "#000000").lstrip("#")
+
+
+def wants_backdrop(project, clip):
+    """True when ``clip`` gets a blurred copy of itself behind it: blur mode, an untouched (fitted, centred) picture
+    on the bottom-most picture layer whose shape doesn't already fill the canvas. The preview uses the same rule."""
+    if getattr(project, "bg_mode", "color") != "blur" or clip.title is not None or has_transform(clip):
+        return False
+    m = project.media.get(clip.media_id)
+    if m is None or m.kind not in ("video", "image") or clip.track != project.main_picture_track():
+        return False
+    if m.width > 0 and m.height > 0 and abs(m.width / m.height - project.width / project.height) < 0.01:
+        return False
+    return True
+
+
+def backdrop_filters(W, H):
+    """Filter chain: the picture scaled to *cover* the canvas, cropped and blurred (done small, then scaled up)."""
+    sw, sh = max(2, W // 8 // 2 * 2), max(2, H // 8 // 2 * 2)
+    return [f"scale={sw}:{sh}:force_original_aspect_ratio=increase", f"crop={sw}:{sh}", "boxblur=luma_radius=3:luma_power=2",
+            f"scale={W}:{H}:flags=bilinear", "setsar=1", "format=rgba"]
+
+
 def _ffmpeg_major():
     try:
         out = subprocess.run([ffmpeg_path(), "-version"], capture_output=True, text=True, **_NOWIN).stdout
@@ -493,7 +578,7 @@ def render_reversed_media(project, out_dir, chunk=REVERSE_CHUNK, progress=None, 
 
 
 def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Medium", text_images=None,
-                         reversed_media=None):
+                         reversed_media=None, gpu=None):
     """Build the ffmpeg argv that renders the whole timeline. Raises ValueError for an empty timeline.
 
     ``text_images`` maps a title clip's id to a transparent, project-sized PNG of that title (the UI
@@ -502,6 +587,8 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
     ``reversed_media`` maps a reversed clip's id to its source window already played backwards
     (:func:`render_reversed_media`). A reversed clip without an entry is reversed inline with the ``reverse``
     filter, which is fine for short clips but needs the whole clip in memory.
+
+    ``gpu`` is a hardware encoder name from :data:`GPU_ENCODERS` (see :func:`gpu_encoder`); MP4 only, WebM ignores it.
     """
     text_images = text_images or {}
     reversed_media = reversed_media or {}
@@ -545,24 +632,37 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             if abs(c.speed - 1.0) > 1e-9 and m.kind not in ("image", "text"):
                 lead.append(f"setpts=(PTS-STARTPTS)/{_n6(c.speed)}")
             keep = [f"tpad=stop_mode=clone:stop_duration={_n6(hold)}"] if hold > 0 and m.kind == "video" else []
-            chain = lead + [f"fps={fps}"] + keep + _fit(W, H, c)
+            backdrop = wants_backdrop(project, c)
+            head = lead + [f"fps={fps}"] + keep
+            if backdrop:                      # one decode feeds both the blurred backdrop and the fitted picture
+                filters.append(f"[{i}:v]{','.join(head)},split[s{i}a][s{i}b]")
+                chain = _fit(W, H, c)
+            else:
+                chain = head + _fit(W, H, c)
             if not moved:
                 chain.append(f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black@0")
             anim = _anim_filters(c)
             chain += anim["rotate"]
+            eq = None
             if abs(c.brightness) > 1e-3 or abs(c.contrast - 1) > 1e-3 or abs(c.saturation - 1) > 1e-3:
-                chain.append(f"eq=brightness={_num(c.brightness)}:contrast={_num(c.contrast)}:saturation={_num(c.saturation)}")
+                eq = f"eq=brightness={_num(c.brightness)}:contrast={_num(c.contrast)}:saturation={_num(c.saturation)}"
+                chain.append(eq)
+            if backdrop:
+                bgc = backdrop_filters(W, H) + ([eq] if eq else []) + [f"setpts=PTS-STARTPTS+{_num(c.start)}/TB"]
+                filters.append(f"[s{i}b]{','.join(bgc)}[b{i}]")
+                vparts.append((f"b{i}", c.start, c.end + hold))
             op = _kf_opacity_filter(c)
             if op:
                 chain.append(op)
             chain += anim["fade"] + anim["scale"]
+            src_pad = f"s{i}a" if backdrop else f"{i}:v"
             if moved:
                 filters.append(f"[{i}:v]{','.join(chain)}[t{i}]")
                 filters += _place(f"t{i}", f"p{i}", W, H, c, fps, f"e{i}", animate=True)
                 filters.append(f"[p{i}]setpts=PTS-STARTPTS+{_num(c.start)}/TB[v{i}]")
             else:
                 chain.append(f"setpts=PTS-STARTPTS+{_num(c.start)}/TB")
-                filters.append(f"[{i}:v]{','.join(chain)}[v{i}]")
+                filters.append(f"[{src_pad}]{','.join(chain)}[v{i}]")
             end = c.end + hold
             wipe = (animation.expressions(c.animation, c.duration) or {}).get("wipe")
             if wipe:                                                # a wipe-in (In animation or transition): a mask
@@ -579,7 +679,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             filters.append(f"[{i}:a]{','.join(alead + ['aresample=48000', 'aformat=channel_layouts=stereo'] + tail)}[a{i}]")
             aparts.append(i)
 
-    filters.insert(0, f"color=c=black:s={W}x{H}:r={fps}:d={_num(total)},format=rgba[base]")
+    filters.insert(0, f"color=c={bg_color_arg(project)}:s={W}x{H}:r={fps}:d={_num(total)},format=rgba[base]")
     last = "base"
     for k, (lab, t0, t1) in enumerate(vparts):
         out = f"o{k}"
@@ -596,8 +696,9 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
         maps += ["-map", "[aout]"]
 
     cmd += _graph_args(";".join(filters)) + maps
-    cmd += spec["v"]
-    if spec["crf"]:
+    vargs, use_crf = _video_args(spec, quality, gpu)
+    cmd += vargs
+    if use_crf:
         cmd += ["-crf", str(QUALITY[quality])]
     if aparts:
         cmd += spec["a"]
@@ -673,7 +774,7 @@ def composite_still_cmd(project, t, w, h):
     if not exe:
         raise RuntimeError("ffmpeg not found")
     cmd = [exe, "-v", "error", "-nostdin"]
-    filters = [f"color=c=black:s={w}x{h}:d=1,format=rgba[base]"]
+    filters = [f"color=c={bg_color_arg(project)}:s={w}x{h}:d=1,format=rgba[base]"]
     last = "base"
     for n, c in enumerate(project.video_clips_at(t)):            # bottom layer first
         m = project.media[c.media_id]
@@ -684,6 +785,12 @@ def composite_still_cmd(project, t, w, h):
             src = min(max(0.0, src), max(0.0, m.duration - 1.0 / max(1, project.fps)))
             cmd += ["-ss", f"{src:.3f}", "-i", m.path]
         moved = has_transform(c)
+        src_pad = f"{n}:v"
+        if wants_backdrop(project, c):
+            filters.append(f"[{n}:v]split[s{n}a][s{n}b]")
+            filters.append(f"[s{n}b]{','.join(backdrop_filters(w, h))}[b{n}]")
+            filters.append(f"[{last}][b{n}]overlay=shortest=0[bo{n}]")
+            last, src_pad = f"bo{n}", f"s{n}a"
         chain = _fit(w, h, c, ":flags=fast_bilinear")
         if not moved:
             chain.append(f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0")
@@ -692,10 +799,10 @@ def composite_still_cmd(project, t, w, h):
         if c.opacity < 0.999:
             chain.append(f"colorchannelmixer=aa={_num(c.opacity)}")
         if moved:
-            filters.append(f"[{n}:v]{','.join(chain)}[t{n}]")
+            filters.append(f"[{src_pad}]{','.join(chain)}[t{n}]")
             filters += _place(f"t{n}", f"l{n}", w, h, c, 30, f"c{n}")
         else:
-            filters.append(f"[{n}:v]{','.join(chain)}[l{n}]")
+            filters.append(f"[{src_pad}]{','.join(chain)}[l{n}]")
         filters.append(f"[{last}][l{n}]overlay=shortest=0[o{n}]")
         last = f"o{n}"
     filters.append(f"[{last}]format=rgb24[out]")

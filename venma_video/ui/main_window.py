@@ -5,11 +5,11 @@ import shutil
 import tempfile
 
 from PyQt5.QtCore import Qt, QSize, QTimer, QSettings, QStandardPaths
-from PyQt5.QtGui import QKeySequence, QPixmap
+from PyQt5.QtGui import QKeySequence, QPixmap, QColor
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAction, QActionGroup,
     QSplitter, QFileDialog, QMessageBox, QProgressDialog, QSizePolicy, QStackedWidget, QButtonGroup,
-    QApplication, QToolButton, QMenu, QFrame, QDialog,
+    QApplication, QToolButton, QMenu, QFrame, QDialog, QColorDialog,
 )
 
 from . import theme
@@ -17,7 +17,7 @@ from ..core import ffmpeg_tools as ft
 from ..core import animation as anim_core
 from ..core.project import TRANSITIONS
 from ..core import voiceover as vo_core
-from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS, SPEED_PRESETS, MIN_CLIP
+from ..core.project import ASPECTS, Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS, SPEED_PRESETS, MIN_CLIP
 from .timeline import TimelineWidget, format_tc
 from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
 from .titles import render_project_titles
@@ -104,6 +104,10 @@ class MainWindow(QMainWindow):
         self.a_prune = A("&Remove Empty Layers", self.remove_empty_layers, None, "prune")
         self.a_export = A("&Export Video…", self.export_video, "Ctrl+M", "export")
         self.a_settings = A("Project &Settings…", self.project_settings, "Ctrl+Alt+P", "settings")
+        self.a_aspects = [(A(label, lambda aw=aw, ah=ah: self.switch_canvas(aw, ah)), aw, ah) for label, aw, ah in ASPECTS]
+        self.a_bg_color = A("Background: &Color Fill", lambda: self.set_canvas_background("color"))
+        self.a_bg_blur = A("Background: &Blurred Picture", lambda: self.set_canvas_background("blur"))
+        self.a_bg_pick = A("Background Color…", self.pick_canvas_color)
         self.a_quit = A("&Quit", self.close, "Ctrl+Q", "quit")
         self.a_undo = A("&Undo", self.undo, "Ctrl+Z", "undo")
         self.a_redo = A("&Redo", self.redo, "Ctrl+Y", "redo")
@@ -243,6 +247,12 @@ class MainWindow(QMainWindow):
             sub = menu.addMenu(title)
             for a in items:
                 sub.addSeparator() if a is None else sub.addAction(a)
+        canvas_menu = menu.addMenu("Canvas")
+        for a, _, _ in self.a_aspects:
+            canvas_menu.addAction(a)
+        canvas_menu.addSeparator()
+        for a in (self.a_bg_color, self.a_bg_blur, self.a_bg_pick):
+            canvas_menu.addAction(a)
         clip_menu = menu.addMenu("Clip")
         clip_menu.addAction(self.a_reverse)
         speed_menu = clip_menu.addMenu("Speed")
@@ -1239,6 +1249,7 @@ class MainWindow(QMainWindow):
             return
         self.engine.pause()
         self.project = Project(*d.values(), typed=True)
+        self.project.set_background(*d.background())
         self.path, self.dirty = None, False
         self.thumbs.clear()
         self.engine.t = 0.0
@@ -1247,10 +1258,28 @@ class MainWindow(QMainWindow):
 
     def project_settings(self):
         p = self.project
-        d = ProjectDialog(self, p.width, p.height, p.fps, "Project Settings")
+        d = ProjectDialog(self, p.width, p.height, p.fps, "Project Settings", p.bg_mode, p.bg_color)
         if d.exec_() == ProjectDialog.Accepted:
             p.width, p.height, p.fps = d.values()
+            p.set_background(*d.background())
             self.commit("Project Settings")
+
+    def switch_canvas(self, aw, ah):
+        """Canvas aspect-ratio switch (9:16, 1:1, 16:9, 4:5): pictures re-fit inside the new frame."""
+        p = self.project
+        self.engine.pause()
+        p.set_canvas(aw, ah)
+        self.commit(f"Canvas {aw}:{ah}")
+
+    def set_canvas_background(self, mode):
+        self.project.set_background(mode)
+        self.commit("Canvas Background")
+
+    def pick_canvas_color(self):
+        c = QColorDialog.getColor(QColor(self.project.bg_color), self, "Canvas color")
+        if c.isValid():
+            self.project.set_background("color", c.name())
+            self.commit("Canvas Background")
 
     def open_project(self):
         if not self._confirm_discard():
@@ -1333,6 +1362,17 @@ class MainWindow(QMainWindow):
         if missing:
             QMessageBox.warning(self, "Missing media", "Can't export — missing files:\n\n" + "\n".join(sorted(set(missing))[:15]))
             return
+        ep = p
+        size = d.size()
+        if size and tuple(size) != (p.width, p.height):
+            # A social preset is a temporary canvas switch: the export is laid out on a copy of the project at that
+            # size (clips keep their place as fractions of the frame; pictures are re-fitted, backdrop behind them).
+            ep = Project.from_dict(p.to_dict())
+            ep.width, ep.height = size
+        self._run_export(ep, out, fmt, quality, d.gpu_encoder())
+
+    def _run_export(self, p, out, fmt, quality, gpu):
+        """Render ``p`` to ``out``. With a GPU encoder, a failed export is retried once on the CPU."""
         title_dir = None
         try:
             text_images = {}
@@ -1345,12 +1385,12 @@ class MainWindow(QMainWindow):
                 # short pieces first (inside the worker, with progress), and the export command is built after that.
                 rev_dir = tempfile.mkdtemp(prefix="venma_rev_")
 
-                def prepare(progress, cancelled, p=p, out=out, fmt=fmt, quality=quality, ti=text_images, d=rev_dir):
+                def prepare(progress, cancelled, p=p, out=out, fmt=fmt, quality=quality, ti=text_images, d=rev_dir, g=gpu):
                     rev = ft.render_reversed_media(p, d, progress=progress, cancelled=cancelled)
-                    return ft.build_export_command(p, out, fmt, quality, text_images=ti, reversed_media=rev)
+                    return ft.build_export_command(p, out, fmt, quality, text_images=ti, reversed_media=rev, gpu=g)
                 cmd = None
             else:
-                cmd = ft.build_export_command(p, out, fmt, quality, text_images=text_images)
+                cmd = ft.build_export_command(p, out, fmt, quality, text_images=text_images, gpu=gpu)
         except Exception as e:
             if title_dir:
                 shutil.rmtree(title_dir, ignore_errors=True)
@@ -1374,7 +1414,11 @@ class MainWindow(QMainWindow):
             if rev_dir:
                 shutil.rmtree(rev_dir, ignore_errors=True)
             if ok:
-                QMessageBox.information(self, "Export", f"Saved to\n{out}")
+                QMessageBox.information(self, "Export", f"Saved to\n{out}"
+                                        + (f"\n\nEncoded on the GPU ({ft.gpu_label(gpu)})." if gpu else ""))
+            elif gpu and "cancel" not in msg.lower():
+                self.statusBar().showMessage("GPU encoder failed, retrying on the CPU…", 8000)
+                QTimer.singleShot(0, lambda: self._run_export(p, out, fmt, quality, None))
             elif "cancel" not in msg.lower():
                 QMessageBox.critical(self, "Export failed", msg)
         w.finished_ok.connect(done)

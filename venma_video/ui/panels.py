@@ -15,9 +15,10 @@ from . import theme
 from ..core import animation as anim
 from ..core import ffmpeg_tools as ft
 from ..core.project import (
-    PRESETS, KEYFRAMED_PROPS, MIN_SPEED, MAX_SPEED, SPEED_PRESETS, TRANSITIONS, MIN_TRANSITION, MAX_TRANSITION,
+    PRESETS, ASPECTS, EXPORT_PRESETS, canvas_size, KEYFRAMED_PROPS, MIN_SPEED, MAX_SPEED, SPEED_PRESETS, TRANSITIONS, MIN_TRANSITION, MAX_TRANSITION,
     DEFAULT_TRANSITION,
 )
+from ..core.project import normalize_color
 from .timeline import MIME_MEDIA, format_tc
 from .docks import CollapsibleSection
 
@@ -998,7 +999,8 @@ class TextPanel(QWidget):
 
 # ── Dialogs ──────────────────────────────────────────────────────────────────
 class ProjectDialog(QDialog):
-    def __init__(self, parent=None, width=1920, height=1080, fps=30, title="New Project"):
+    def __init__(self, parent=None, width=1920, height=1080, fps=30, title="New Project",
+                 bg_mode="color", bg_color="#000000"):
         super().__init__(parent)
         self.setWindowTitle(title)
         form = QFormLayout(self)
@@ -1016,9 +1018,28 @@ class ProjectDialog(QDialog):
         self.preset.setCurrentIndex(idx)
         self.preset.currentIndexChanged.connect(self._preset)
         form.addRow("Preset", self.preset)
+        self.aspect = QComboBox()                       # canvas aspect switch: keeps the short side
+        self.aspect.addItem("Keep current", None)
+        for label, aw, ah in ASPECTS:
+            self.aspect.addItem(label, (aw, ah))
+        self.aspect.currentIndexChanged.connect(self._aspect)
+        form.addRow("Aspect ratio", self.aspect)
         row = QHBoxLayout(); row.addWidget(self.w); row.addWidget(QLabel("×")); row.addWidget(self.h)
         form.addRow("Size", row)
         form.addRow("Frame rate", self.fps)
+        self.bg_mode = QComboBox()
+        self.bg_mode.addItem("Color fill", "color")
+        self.bg_mode.addItem("Blurred picture", "blur")
+        self.bg_mode.setCurrentIndex(max(0, self.bg_mode.findData(bg_mode)))
+        self._bg_color = normalize_color(bg_color)
+        self.bg_btn = QPushButton()
+        self.bg_btn.setCursor(Qt.PointingHandCursor)
+        self.bg_btn.clicked.connect(self._pick_color)
+        self._paint_swatch()
+        brow = QHBoxLayout(); brow.addWidget(self.bg_mode, 1); brow.addWidget(self.bg_btn)
+        form.addRow("Background", brow)
+        self.bg_mode.currentIndexChanged.connect(self._sync_bg)
+        self._sync_bg()
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         form.addRow(bb)
@@ -1029,8 +1050,33 @@ class ProjectDialog(QDialog):
         if d:
             self.w.setValue(d[0]); self.h.setValue(d[1])
 
+    def _aspect(self, i):
+        d = self.aspect.itemData(i)
+        if d:
+            w, h = canvas_size(self.w.value(), self.h.value(), *d)
+            self.w.setValue(w); self.h.setValue(h)
+
+    def _paint_swatch(self):
+        self.bg_btn.setText(self._bg_color.upper())
+        self.bg_btn.setStyleSheet(f"QPushButton {{ background: {self._bg_color}; "
+                                  f"color: {'#000' if QColor(self._bg_color).lightness() > 128 else '#fff'}; "
+                                  f"border: 1px solid #888; padding: 3px 10px; }}")
+
+    def _pick_color(self):
+        c = QColorDialog.getColor(QColor(self._bg_color), self, "Canvas color")
+        if c.isValid():
+            self._bg_color = normalize_color(c.name())
+            self._paint_swatch()
+
+    def _sync_bg(self):
+        self.bg_btn.setEnabled(self.bg_mode.currentData() == "color")
+        self.bg_btn.setToolTip("Color shown around pictures that don't fill the canvas")
+
     def values(self):
         return self.w.value(), self.h.value(), self.fps.currentData()
+
+    def background(self):
+        return self.bg_mode.currentData(), self._bg_color
 
 
 class ExportDialog(QDialog):
@@ -1038,6 +1084,10 @@ class ExportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Export Video")
         form = QFormLayout(self)
+        self.project = project
+        self.preset = QComboBox()
+        for label, w, h in EXPORT_PRESETS:
+            self.preset.addItem(label, (w, h) if w else None)
         self.fmt = QComboBox()
         for k in ft.FORMATS:
             self.fmt.addItem(k)
@@ -1049,13 +1099,23 @@ class ExportDialog(QDialog):
         b = QPushButton("Browse…")
         b.clicked.connect(self._browse)
         row = QHBoxLayout(); row.addWidget(self.path, 1); row.addWidget(b)
+        self.gpu_enc = ft.gpu_encoder()
+        self.gpu = QCheckBox(f"Use GPU encoding ({ft.gpu_label(self.gpu_enc)})" if self.gpu_enc
+                             else "GPU encoding (no supported GPU found)")
+        self.gpu.setEnabled(bool(self.gpu_enc))
+        self.gpu.setChecked(bool(self.gpu_enc))
+        self.gpu.setToolTip("Much faster export on MP4. If the GPU encoder fails, the export is retried on the CPU.")
+        form.addRow("Social preset", self.preset)
         form.addRow("Format", self.fmt)
         form.addRow("Quality", self.quality)
+        form.addRow("", self.gpu)
         form.addRow("Save to", row)
-        info = QLabel(f"{project.width} × {project.height}  ·  {project.fps} fps  ·  "
-                      f"{format_tc(project.duration(), project.fps)}")
-        info.setStyleSheet(f"color: {theme.T['muted']};")
-        form.addRow("Project", info)
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        self.info.setStyleSheet(f"color: {theme.T['muted']};")
+        form.addRow("Output", self.info)
+        self.preset.currentIndexChanged.connect(self._update_info)
+        self._update_info()
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Export")
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
@@ -1064,9 +1124,23 @@ class ExportDialog(QDialog):
         theme.tidy(self)
         self.setMinimumWidth(460)
 
+    def _update_info(self):
+        p = self.project
+        w, h = self.size() or (p.width, p.height)
+        txt = f"{w} × {h}  ·  {p.fps} fps  ·  {format_tc(p.duration(), p.fps)}"
+        if (w, h) != (p.width, p.height) and abs(w / h - p.width / p.height) > 0.01:
+            fill = "a blurred copy of the picture" if p.bg_mode == "blur" else "the canvas color"
+            txt += f"\nDifferent shape from the project: pictures are fitted inside the frame, with {fill} around them."
+        self.info.setText(txt)
+
+    def size(self):
+        """(width, height) the export is rendered at, or None for the project's own size."""
+        return self.preset.currentData()
+
     def _fix_ext(self):
         base, _ = os.path.splitext(self.path.text())
         self.path.setText(base + ft.FORMATS[self.fmt.currentText()]["ext"])
+        self.gpu.setEnabled(bool(self.gpu_enc) and ft.FORMATS[self.fmt.currentText()]["ext"] == ".mp4")
 
     def _browse(self):
         ext = ft.FORMATS[self.fmt.currentText()]["ext"]
@@ -1076,3 +1150,7 @@ class ExportDialog(QDialog):
 
     def values(self):
         return self.path.text().strip(), self.fmt.currentText(), self.quality.currentText()
+
+    def gpu_encoder(self):
+        """The hardware encoder to use, or None (unchecked, unsupported or a format that can't use it)."""
+        return self.gpu_enc if self.gpu.isEnabled() and self.gpu.isChecked() else None

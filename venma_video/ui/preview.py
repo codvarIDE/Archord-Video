@@ -85,6 +85,8 @@ class PreviewView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.aspect = 16 / 9
+        self.bg_color = "#000000"            # canvas fill around pictures
+        self.backdrop_check = None           # callable(clip) -> True when a blurred copy of the picture goes behind it
         self.layer_images = {}               # picture clip id -> latest decoded QImage of that layer
         self.stack_provider = None           # callable -> every visible clip (pictures + titles), bottom first
         self.selected_provider = None        # callable -> id of the selected clip (or None)
@@ -281,7 +283,7 @@ class PreviewView(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(theme.T["canvas"]))
         r = self._frame_rect()
-        p.fillRect(r, Qt.black)
+        p.fillRect(r, QColor(self.bg_color))
         if self.stack_provider is not None:
             frame = QRectF(r)
             p.setClipRect(r)
@@ -312,6 +314,8 @@ class PreviewView(QWidget):
                 else:
                     img = self.layer_images.get(c.id)
                     if img is not None and not img.isNull():
+                        if self.backdrop_check is not None and self.backdrop_check(c):
+                            self._draw_backdrop(p, frame, img)
                         p.setRenderHint(QPainter.SmoothPixmapTransform)
                         p.setRenderHint(QPainter.Antialiasing)
                         p.setOpacity(max(0.0, min(1.0, opacity)))
@@ -324,6 +328,20 @@ class PreviewView(QWidget):
                 p.restore()
             p.setClipping(False)
         self._paint_overlay(p, r)
+
+    @staticmethod
+    def _draw_backdrop(p, frame, img):
+        """Blurred copy of the picture covering the whole frame: crop to the frame's shape, shrink, stretch back up."""
+        iw, ih = img.width(), img.height()
+        fa = frame.width() / max(1.0, frame.height())
+        cw, ch = (ih * fa, ih) if iw / ih > fa else (iw, iw / fa)
+        crop = img.copy(int((iw - cw) / 2), int((ih - ch) / 2), max(1, int(cw)), max(1, int(ch)))
+        small = crop.scaled(max(2, int(frame.width() // 12)), max(2, int(frame.height() // 12)),
+                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        p.save()
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.drawImage(frame, small)
+        p.restore()
 
     def _paint_overlay(self, p, r):
         """Editing aids (never exported): centre guides while dragging, selection box and handles."""
@@ -669,6 +687,8 @@ class PreviewEngine(QObject):
         changed = (pw, ph, pfps) != (self._pw, self._ph, self._pfps)
         self._pw, self._ph, self._pfps = pw, ph, pfps
         self.view.set_aspect(project.width, project.height)
+        self.view.bg_color = project.bg_color
+        self.view.backdrop_check = lambda c, pr=project: ft.wants_backdrop(pr, c)
         if changed or reset:
             self._cache.clear()
         if self.playing:

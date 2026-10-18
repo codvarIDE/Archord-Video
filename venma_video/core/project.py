@@ -71,6 +71,25 @@ PRESETS = [
     ("Square 1:1  ·  1080 × 1080", 1080, 1080),
 ]
 
+# Canvas aspect switch: (label, width ratio, height ratio). ``Project.set_canvas`` keeps the short side.
+ASPECTS = [
+    ("16:9  ·  YouTube / landscape", 16, 9),
+    ("9:16  ·  TikTok / Reels / Shorts", 9, 16),
+    ("1:1  ·  Square", 1, 1),
+    ("4:5  ·  Instagram portrait", 4, 5),
+]
+
+# Export presets: (label, width, height). ``None`` size = the project's own canvas.
+EXPORT_PRESETS = [
+    ("Same as project", None, None),
+    ("TikTok / Reels / Shorts  ·  9:16  ·  1080 × 1920", 1080, 1920),
+    ("Square  ·  1:1  ·  1080 × 1080", 1080, 1080),
+    ("YouTube / landscape  ·  16:9  ·  1920 × 1080", 1920, 1080),
+    ("4K UHD  ·  16:9  ·  3840 × 2160", 3840, 2160),
+]
+
+BG_MODES = ("color", "blur")           # what shows around a picture that doesn't fill the canvas
+
 # clip colour/effect defaults
 # scale: 1.0 = the picture fitted to the frame; pos_x / pos_y: where its centre sits, as a fraction of the frame.
 # rotation: degrees, clockwise.
@@ -450,14 +469,52 @@ class Clip:
         self.keyframes = sorted(kept, key=lambda k: k.t)
 
 
+def canvas_size(width, height, aw, ah):
+    """(w, h) of the ``aw:ah`` canvas that keeps the short side of ``width`` x ``height``; both even."""
+    short = min(width, height)
+    if aw >= ah:
+        h, w = short, short * aw / ah
+    else:
+        w, h = short, short * ah / aw
+    return max(2, int(round(w / 2)) * 2), max(2, int(round(h / 2)) * 2)
+
+
+def normalize_color(value, default="#000000"):
+    """``value`` as a ``#rrggbb`` string (lower case), or ``default`` when it isn't a valid hex colour."""
+    v = str(value or "").strip().lstrip("#")
+    if len(v) == 3:
+        v = "".join(ch * 2 for ch in v)
+    if len(v) == 6 and all(ch in "0123456789abcdefABCDEF" for ch in v):
+        return "#" + v.lower()
+    return default
+
+
 class Project:
     def __init__(self, width=1920, height=1080, fps=30, typed=False):
         self.width, self.height, self.fps = int(width), int(height), int(fps)
+        self.bg_mode = "color"              # "color": solid fill around pictures; "blur": blurred copy of the picture
+        self.bg_color = "#000000"
         self.typed = bool(typed)            # True: layers are typed (video / photo / text / audio), CapCut style
         self.tracks = copy.deepcopy(TYPED_TRACKS if typed else DEFAULT_TRACKS)
         self.media = {}          # id -> MediaItem
         self.clips = []          # list[Clip]
         self._ids = itertools.count(1)
+
+    # ── canvas ──
+    def set_canvas(self, aw, ah):
+        """Switch the canvas to the aspect ratio ``aw:ah``, keeping the short side (1080 x 1920 <-> 1920 x 1080)."""
+        self.width, self.height = canvas_size(self.width, self.height, aw, ah)
+
+    def set_background(self, mode, color=None):
+        self.bg_mode = mode if mode in BG_MODES else "color"
+        if color is not None:
+            self.bg_color = normalize_color(color)
+
+    def main_picture_track(self):
+        """Index of the bottom-most track that holds a picture (video / image) clip, or None."""
+        tracks = [c.track for c in self.clips
+                  if c.title is None and c.media_id in self.media and self.media[c.media_id].kind in ("video", "image")]
+        return max(tracks) if tracks else None
 
     # ── ids ──
     def _new_id(self, prefix):
@@ -1276,12 +1333,14 @@ class Project:
     # ── (de)serialisation ──
     def to_dict(self):
         return dict(version=PROJECT_VERSION, width=self.width, height=self.height, fps=self.fps,
+                    bg_mode=self.bg_mode, bg_color=self.bg_color,
                     typed=self.typed, tracks=self.tracks, media=[m.to_dict() for m in self.media.values()],
                     clips=[c.to_dict() for c in self.clips])
 
     @staticmethod
     def from_dict(d):
         p = Project(d.get("width", 1920), d.get("height", 1080), d.get("fps", 30), typed=d.get("typed", False))
+        p.set_background(d.get("bg_mode", "color"), d.get("bg_color", "#000000"))
         p.tracks = copy.deepcopy(d.get("tracks") or (TYPED_TRACKS if p.typed else DEFAULT_TRACKS))
         for m in d.get("media", []):
             p.media[m["id"]] = MediaItem.from_dict(m)
