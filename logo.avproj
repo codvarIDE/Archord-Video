@@ -1,0 +1,98 @@
+{
+ "version": 1,
+ "width": 1920,
+ "height": 1080,
+ "fps": 30,
+ "bg_mode": "color",
+ "bg_color": "#ffffff",
+ "typed": true,
+ "tracks": [
+  {
+   "name": "Video",
+   "kind": "video",
+   "type": "video"
+  },
+  {
+   "name": "Audio",
+   "kind": "audio",
+   "type": "audio"
+  }
+ ],
+ "media": [
+  {
+   "id": "m1",
+   "path": "C:/Users/user/Desktop/Gladnet_HealthTech_Website/assets/gladnet-logo.png",
+   "kind": "image",
+   "duration": 5.0,
+   "width": 1254,
+   "height": 1254,
+   "fps": 0.0,
+   "has_audio": false
+  },
+  {
+   "id": "m3",
+   "path": "C:/Users/user/Music/Test Tube Baby   Tyga.mp3",
+   "kind": "audio",
+   "duration": 160.829042,
+   "width": 0,
+   "height": 0,
+   "fps": 0.0,
+   "has_audio": true
+  }
+ ],
+ "clips": [
+  {
+   "id": "c2",
+   "media_id": "m1",
+   "track": 0,
+   "start": 0.0,
+   "in_point": 0.0,
+   "duration": 5.0,
+   "volume": 1.0,
+   "opacity": 1.0,
+   "brightness": 0.0,
+   "contrast": 1.0,
+   "saturation": 1.0,
+   "scale": 0.3292,
+   "pos_x": 0.5,
+   "pos_y": 0.5,
+   "rotation": 0.0,
+   "keyframes": [
+    {
+     "t": 0.0,
+     "pos_x": 0.5,
+     "pos_y": 0.5,
+     "scale": 0.3292,
+     "rotation": 0.0,
+     "opacity": 1.0
+    },
+    {
+     "t": 2.25,
+     "pos_x": 0.5,
+     "pos_y": 0.5,
+     "scale": 0.9257,
+     "rotation": 0.0,
+     "opacity": 1.0
+    }
+   ]
+  },
+  {
+   "id": "c4",
+   "media_id": "m3",
+   "track": 1,
+   "start": 0.0,
+   "in_point": 0.0,
+   "duration": 5.0,
+   "volume": 1.0,
+   "opacity": 1.0,
+   "brightness": 0.0,
+   "contrast": 1.0,
+   "saturation": 1.0,
+   "scale": 1.0,
+   "pos_x": 0.5,
+   "pos_y": 0.5,
+   "rotation": 0.0,
+   "fade_in": 10.0
+  }
+ ]
+}

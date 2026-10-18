@@ -192,7 +192,7 @@ class VoiceoverDialog(QDialog):
         self.device.setMinimumWidth(240)
         for name, dev in recorder_factory.devices():
             self.device.addItem(name, dev)
-        saved = QSettings("Venma", "VideoEditor").value(DEVICE_KEY, "")
+        saved = QSettings("Archord", "VideoEditor").value(DEVICE_KEY, "")
         i = self.device.findText(str(saved)) if saved else -1
         if i >= 0:
             self.device.setCurrentIndex(i)
@@ -297,7 +297,7 @@ class VoiceoverDialog(QDialog):
     def _begin(self):
         if self.device.currentIndex() < 0:
             return
-        QSettings("Venma", "VideoEditor").setValue(DEVICE_KEY, self.device.currentText())
+        QSettings("Archord", "VideoEditor").setValue(DEVICE_KEY, self.device.currentText())
         self._lock_options(True)
         if self.chk_count.isChecked():
             self.state, self._count = "countdown", self.COUNTDOWN

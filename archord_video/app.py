@@ -20,13 +20,13 @@ def main(argv=None):
     argv = sys.argv if argv is None else argv
     if sys.platform == "win32":
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("venma.videoeditor.app.1.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("archord.videoeditor.app.1.0")
         except Exception:
             pass
 
     app = QApplication(argv)
     app.setStyle("Fusion")
-    app.setApplicationName("Venma Video")
+    app.setApplicationName("Archord Video")
     theme.init(app)
     icon = theme.app_icon()
     app.setWindowIcon(icon)

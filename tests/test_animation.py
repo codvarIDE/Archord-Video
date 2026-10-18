@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from venma_video.core import animation as A
-from venma_video.core import ffmpeg_tools as ft
-from venma_video.core.project import Clip, MediaItem, Project
+from archord_video.core import animation as A
+from archord_video.core import ffmpeg_tools as ft
+from archord_video.core.project import Clip, MediaItem, Project
 
 
 def _project(duration=4.0, anim=None):

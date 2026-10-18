@@ -11,9 +11,9 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from venma_video.core import ffmpeg_tools as ft
-from venma_video.core import waveform
-from venma_video.core.project import MAX_FADE, Clip, MediaItem, Project
+from archord_video.core import ffmpeg_tools as ft
+from archord_video.core import waveform
+from archord_video.core.project import MAX_FADE, Clip, MediaItem, Project
 
 HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 RATE = 48000
@@ -127,7 +127,7 @@ class FadeModelTests(unittest.TestCase):
         self.assertEqual((right.fade_in, right.fade_out), (0.0, 2.0))
 
     def test_reset_effects_leaves_fades_alone(self):
-        from venma_video.core.project import CLIP_DEFAULTS
+        from archord_video.core.project import CLIP_DEFAULTS
         self.p.set_fade(self.a.id, "in", 1.0)
         self.assertNotIn("fade_in", CLIP_DEFAULTS)
         self.assertNotIn("fade_out", CLIP_DEFAULTS)
@@ -455,7 +455,7 @@ class FadeUiTests(unittest.TestCase):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
     def window(self):
-        from venma_video.ui.main_window import MainWindow
+        from archord_video.ui.main_window import MainWindow
         w = MainWindow()
         self.addCleanup(self._dispose, w)
         p = w.project

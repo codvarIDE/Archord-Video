@@ -1,4 +1,4 @@
-# Venma Video
+# Archord Video
 
 [![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
 
@@ -13,7 +13,7 @@ git clone https://github.com/OWNER/REPO.git
 cd REPO
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python -m venma_video            # or: python main.py clip1.mp4 clip2.mp4
+python -m archord_video            # or: python main.py clip1.mp4 clip2.mp4
 ```
 
 FFmpeg is required (`ffmpeg` + `ffprobe`):
@@ -25,7 +25,7 @@ FFmpeg is required (`ffmpeg` + `ffprobe`):
 | Linux | `sudo apt install ffmpeg` |
 
 Or drop the binaries into a local `ffmpeg/` folder in the repo root (git-ignored), or set the
-`VENMA_FFMPEG` / `VENMA_FFPROBE` environment variables.
+`ARCHORD_FFMPEG` / `ARCHORD_FFPROBE` environment variables.
 
 Optional: `pip install qtawesome` for a few extra legacy icons.
 
@@ -46,9 +46,9 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 - **Export**: MP4 (H.264 + AAC) or WebM (VP9 + Opus), quality High/Medium/Low. Layers are composited by track order with opacity; all audio is mixed.
 - **Social presets**: in the Export dialog pick **TikTok / Reels / Shorts 9:16** (1080 × 1920), **Square 1:1** (1080 × 1080), **YouTube 16:9** (1920 × 1080) or **4K UHD** (3840 × 2160), or keep the project's own size. A preset with a different shape is a temporary canvas switch: pictures are fitted inside the new frame, with the canvas background around them.
 - **Canvas aspect switch & background**: `Menu > Canvas` switches the project between 16:9, 9:16, 1:1 and 4:5 (the short side is kept), and sets what shows around a picture that doesn't fill the frame: a **color fill** (pick any color) or a **blurred copy of the picture**. The same settings are in Project Settings, and are saved with the project. The preview shows exactly what is exported. Blur applies to untouched pictures on the bottom picture layer; a picture you move or resize shows the color fill instead.
-- **GPU encoding**: the Export dialog uses a hardware H.264 encoder for MP4 when one really works on your machine (NVIDIA NVENC, Intel Quick Sync, AMD AMF or Apple VideoToolbox are tested with a short trial encode). If the GPU encoder fails mid-export, Venma retries on the CPU automatically. WebM always uses the CPU.
-- **Projects**: save/open `.vvproj` (JSON, references your media files by path). Saving is crash-safe: the old file is only replaced once the new one is fully written.
-- **Autosave & crash recovery**: unsaved work is snapshotted every 15 seconds while you edit. If Venma Video crashes, is killed or the computer loses power, the next start offers to **Recover** it (or Discard / Ask me later). Nothing is left behind after a normal exit or a Save. Snapshots live in the app data folder, not next to your project.
+- **GPU encoding**: the Export dialog uses a hardware H.264 encoder for MP4 when one really works on your machine (NVIDIA NVENC, Intel Quick Sync, AMD AMF or Apple VideoToolbox are tested with a short trial encode). If the GPU encoder fails mid-export, Archord retries on the CPU automatically. WebM always uses the CPU.
+- **Projects**: save/open `.avproj` (JSON, references your media files by path). Saving is crash-safe: the old file is only replaced once the new one is fully written.
+- **Autosave & crash recovery**: unsaved work is snapshotted every 15 seconds while you edit. If Archord Video crashes, is killed or the computer loses power, the next start offers to **Recover** it (or Discard / Ask me later). Nothing is left behind after a normal exit or a Save. Snapshots live in the app data folder, not next to your project.
 
 ## Shortcuts
 | Key | Action |
@@ -87,9 +87,9 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 ## Project layout
 
 ```
-venma_video/
+archord_video/
 ├── app.py            # QApplication setup / entry point
-├── __main__.py       # python -m venma_video
+├── __main__.py       # python -m archord_video
 ├── workers.py        # background QThreads: media import, waveform decoding + export with progress
 ├── core/             # no Qt UI code — easy to test
 │   ├── project.py        # timeline model (media, clips, tracks), edits, JSON snapshots for undo
@@ -106,8 +106,8 @@ venma_video/
 │   ├── voiceover.py      # microphone capture (QAudioInput) and the Record Voiceover dialog
 │   ├── panels.py         # Media bin, Text presets, Details (properties), New-project and Export dialogs
 │   ├── docks.py          # CollapsibleSection and small toolbar helpers
-│   └── theme.py          # shared Venma design tokens, icons and stylesheet
-└── assets/           # Venma logo (venma_cut_violet.ico) and other static files (a packaged copy lives in venma_video/assets/)
+│   └── theme.py          # shared Archord design tokens, icons and stylesheet
+└── assets/           # Archord logo (archord_cut_violet.ico) and other static files (a packaged copy lives in archord_video/assets/)
 tests/                # unittest/pytest suite
 docs/ARCHITECTURE.md  # deeper notes
 ```

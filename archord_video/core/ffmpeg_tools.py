@@ -19,10 +19,10 @@ _NOWIN = {"creationflags": 0x08000000} if sys.platform == "win32" else {}   # no
 
 
 def _find(name):
-    env = os.environ.get("VENMA_" + name.upper())
+    env = os.environ.get("ARCHORD_" + name.upper())
     if env and os.path.isfile(env):
         return env
-    # Repo root (…/venma_video/core/ffmpeg_tools.py -> …/), then the current working directory.
+    # Repo root (…/archord_video/core/ffmpeg_tools.py -> …/), then the current working directory.
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     exe = name + (".exe" if sys.platform == "win32" else "")
     for base in (root, os.getcwd()):
@@ -38,6 +38,68 @@ def ffmpeg_path():
 
 def ffprobe_path():
     return _find("ffprobe")
+
+
+_FILTERS = None
+MISSING_FILTERS = set()          # filters an export reported as "No such filter" (learned at run time)
+FILTER_FALLBACKS = {"adelay"}    # filters the exporter can work around when this FFmpeg lacks them
+
+
+def has_filter(name):
+    """True when this FFmpeg build has filter ``name`` (stripped-down builds lack some, e.g. ``adelay``).
+    If the build's filter list can't be read, say no, so the portable path is used."""
+    global _FILTERS
+    if name in MISSING_FILTERS:
+        return False
+    exe = ffmpeg_path()
+    if not exe:                                   # no FFmpeg here (tests): keep the normal graph
+        return True
+    if _FILTERS is None:
+        found = set()
+        try:
+            out = subprocess.run([exe, "-hide_banner", "-filters"], capture_output=True, text=True,
+                                 errors="replace", timeout=60, **_NOWIN).stdout
+            for line in out.splitlines():          # e.g. " TSC adelay   A->A   Delay one or more audio channels."
+                parts = line.split()
+                if len(parts) >= 3 and len(parts[0]) == 3 and all(ch in "TSC." for ch in parts[0]):
+                    found.add(parts[1])
+        except Exception:
+            found = set()
+        _FILTERS = found
+    return name in _FILTERS
+
+
+def ffmpeg_too_old():
+    """True when the FFmpeg in use is a version known to lack filters / options the editor needs (older than 4.4)."""
+    exe = ffmpeg_path()
+    if not exe:
+        return False
+    try:
+        out = subprocess.run([exe, "-version"], capture_output=True, text=True, errors="replace", timeout=15, **_NOWIN).stdout
+        tok = out.split()[2]
+    except Exception:
+        return False
+    try:
+        if tok.startswith(("N-", "n-")):                           # a git build: "N-55702-g920046a"
+            return int(tok.split("-")[1]) < 100000                 # 4.4 branched around N-100000
+        nums = tok.lstrip("nN").split("-")[0].split(".")
+        major, minor = int(nums[0]), int(nums[1]) if len(nums) > 1 else 0
+        return (major, minor) < (4, 4)
+    except Exception:
+        return False
+
+
+def ffmpeg_info():
+    """Which FFmpeg is in use and its version line, for error messages."""
+    exe = ffmpeg_path()
+    if not exe:
+        return "FFmpeg: not found"
+    try:
+        out = subprocess.run([exe, "-version"], capture_output=True, text=True, errors="replace", timeout=15, **_NOWIN).stdout
+        line = out.splitlines()[0] if out else ""
+    except Exception as e:
+        line = f"(could not run: {e})"
+    return f"FFmpeg: {exe}\n{line}"
 
 
 def have_ffmpeg():
@@ -675,8 +737,19 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             delay = int(round(c.start * 1000))
             alead = (["areverse"] if inline_reverse else []) + _atempo_chain(c.speed)
             fades = fade_filters(*c.fades(), c.duration)           # after speed / reverse: the clip's own timeline
-            tail = [f"volume={_num(c.volume)}"] + fades + [f"adelay={delay}|{delay}"]
-            filters.append(f"[{i}:a]{','.join(alead + ['aresample=48000', 'aformat=channel_layouts=stereo'] + tail)}[a{i}]")
+            base = alead + ['aresample=48000', 'aformat=channel_layouts=stereo']
+            if has_filter("adelay"):
+                tail = [f"volume={_num(c.volume)}"] + fades + [f"adelay={delay}|{delay}"]
+                filters.append(f"[{i}:a]{','.join(base + tail)}[a{i}]")
+            elif delay <= 0:                                        # starts at 0 and there is no adelay: nothing to delay
+                filters.append(f"[{i}:a]{','.join(base + [f'volume={_num(c.volume)}'] + fades)}[a{i}]")
+            else:
+                # this FFmpeg has no adelay: put the clip after that much silence instead
+                tail = [f"volume={_num(c.volume)}"] + fades + ["aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"]
+                filters.append(f"[{i}:a]{','.join(base + tail)}[ar{i}]")
+                filters.append(f"anullsrc=r=48000:cl=stereo:d={_num(delay / 1000.0)},"
+                               f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[as{i}]")
+                filters.append(f"[as{i}][ar{i}]concat=n=2:v=0:a=1[a{i}]")
             aparts.append(i)
 
     filters.insert(0, f"color=c={bg_color_arg(project)}:s={W}x{H}:r={fps}:d={_num(total)},format=rgba[base]")

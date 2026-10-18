@@ -9,7 +9,7 @@ from . import theme
 from ..core import animation as anim_core
 from ..core.project import MIN_CLIP, NEW_BOTTOM, NEW_TOP, STILL_KINDS
 
-MIME_MEDIA = "application/x-venma-media"
+MIME_MEDIA = "application/x-archord-media"
 HEADER_W = 116
 RULER_H = 28
 TRACK_H = 58

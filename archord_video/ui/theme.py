@@ -1,4 +1,4 @@
-"""Venma Video design system (shared look with Venma): warm paper tones, violet accent, serif headings, line icons.
+"""Archord Video design system (shared look with Archord): warm paper tones, violet accent, serif headings, line icons.
 
 One place for every colour token, the global Qt stylesheet, and the icon set.
 """
@@ -94,11 +94,11 @@ def _svg_pixmap(name, color, size=20, sw=1.75):
     return pm
 
 
-ICON_FILE = "venma_cut_violet.ico"
+ICON_FILE = "archord_cut_violet.ico"
 
 
 def get_app_icon_path():
-    """Absolute path to the Venma logo (.ico): packaged copy first, then the repo-level assets/ folder."""
+    """Absolute path to the Archord logo (.ico): packaged copy first, then the repo-level assets/ folder."""
     pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for base in (os.path.join(pkg, "assets"), os.path.join(os.path.dirname(pkg), "assets"),
                  os.path.join(os.getcwd(), "assets")):
@@ -109,7 +109,7 @@ def get_app_icon_path():
 
 
 def app_icon():
-    """Window/taskbar icon: uses the Venma logo (assets/venma_cut_violet.ico) if present, otherwise generated violet rounded tile."""
+    """Window/taskbar icon: uses the Archord logo (assets/archord_cut_violet.ico) if present, otherwise generated violet rounded tile."""
     ico_path = get_app_icon_path()
     if ico_path:
         return QIcon(ico_path)
@@ -425,7 +425,7 @@ def set_theme(app, name):
     app.setPalette(_palette(T))
     app.setStyleSheet(qss(T))
     refresh_icons()
-    QSettings("Venma", "VideoEditor").setValue("theme_v2", name)
+    QSettings("Archord", "VideoEditor").setValue("theme_v2", name)
 
 
 def init(app):
@@ -436,7 +436,7 @@ def init(app):
     else:
         font = app.font()
     app.setFont(font)
-    set_theme(app, QSettings("Venma", "VideoEditor").value("theme_v2", "dark"))
+    set_theme(app, QSettings("Archord", "VideoEditor").value("theme_v2", "dark"))
 
 
 def tidy(dlg):

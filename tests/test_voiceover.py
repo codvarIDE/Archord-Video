@@ -7,8 +7,8 @@ import wave
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from venma_video.core import voiceover as vo
-from venma_video.core.project import MediaItem, Project
+from archord_video.core import voiceover as vo
+from archord_video.core.project import MediaItem, Project
 
 try:
     import PyQt5  # noqa: F401
@@ -75,7 +75,7 @@ class CoreTests(unittest.TestCase):
 
     def test_recordings_dir(self):
         self.assertEqual(vo.recordings_dir(None, "/fallback"), "/fallback")
-        got = vo.recordings_dir(os.path.join(self.tmp.name, "edit.vvproj"), "/fallback")
+        got = vo.recordings_dir(os.path.join(self.tmp.name, "edit.avproj"), "/fallback")
         self.assertEqual(got, os.path.join(os.path.abspath(self.tmp.name), vo.FOLDER_NAME))
 
 
@@ -142,8 +142,8 @@ if HAVE_QT:
     from PyQt5.QtTest import QTest
     from PyQt5.QtWidgets import QApplication, QDialog
 
-    from venma_video.ui import voiceover as ui_vo
-    from venma_video.ui.timeline import TimelineCanvas
+    from archord_video.ui import voiceover as ui_vo
+    from archord_video.ui.timeline import TimelineCanvas
 
     APP = QApplication.instance() or QApplication([])
 
@@ -412,7 +412,7 @@ if HAVE_QT:
         """Drive MainWindow.record_voiceover with a stand-in dialog (no audio hardware needed)."""
 
         def setUp(self):
-            from venma_video.ui import main_window as mw
+            from archord_video.ui import main_window as mw
             self.mw = mw
             self.tmp = tempfile.TemporaryDirectory()
             self.addCleanup(self.tmp.cleanup)

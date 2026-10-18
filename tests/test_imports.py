@@ -11,15 +11,15 @@ except ImportError:
     HAVE_QT = False
 
 MODULES = [
-    "venma_video.ui.theme",
-    "venma_video.ui.titles",
-    "venma_video.ui.timeline",
-    "venma_video.ui.preview",
-    "venma_video.ui.panels",
-    "venma_video.ui.voiceover",
-    "venma_video.ui.main_window",
-    "venma_video.workers",
-    "venma_video.app",
+    "archord_video.ui.theme",
+    "archord_video.ui.titles",
+    "archord_video.ui.timeline",
+    "archord_video.ui.preview",
+    "archord_video.ui.panels",
+    "archord_video.ui.voiceover",
+    "archord_video.ui.main_window",
+    "archord_video.workers",
+    "archord_video.app",
 ]
 
 

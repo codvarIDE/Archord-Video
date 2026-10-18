@@ -178,7 +178,7 @@ of the clip's start; otherwise it is dormant (kept, not drawn).
 ## Layer controls (hide / lock / mute / reorder)
 
 Each layer is a dict in `Project.tracks`; the switches are plain keys on it (`hidden`, `locked`, `muted`, absent
-when off), so they are saved in `.vvproj`, and undo/redo restores them with the rest of the snapshot.
+when off), so they are saved in `.avproj`, and undo/redo restores them with the rest of the snapshot.
 
 - **Hide** removes the layer's pictures and titles from `visual_clips_at` / `video_clips_at` / `titles_at`
   (preview) and from `build_export_command`. Sound from a hidden video layer still plays; use Mute for that.
@@ -212,7 +212,7 @@ when off), so they are saved in `.vvproj`, and undo/redo restores them with the 
 
 ## Project files
 
-`.vvproj` is JSON (`Project.to_dict()`), versioned via `PROJECT_VERSION`. Media is referenced by
+`.avproj` is JSON (`Project.to_dict()`), versioned via `PROJECT_VERSION`. Media is referenced by
 absolute path, not embedded. Bump `PROJECT_VERSION` and keep `from_dict` backward compatible when
 changing the format.
 
@@ -223,7 +223,7 @@ changing the format.
   the project is dirty and actually changed (`Autosaver.sync` compares the `Project.snapshot()` string). Empty projects
   are never snapshotted.
 - **Sessions.** Each run has a random session id and two files: `<session>.lock` (process id, touched every tick) and
-  `<session>.vvauto` (JSON: format, saved_at, original project path, the project dict). A **clean exit** deletes both. A
+  `<session>.avauto` (JSON: format, saved_at, original project path, the project dict). A **clean exit** deletes both. A
   **successful Save, New or Open** deletes the snapshot. A crash, kill or power cut leaves the snapshot behind.
 - **Who counts as crashed.** `find_recoverable` offers a snapshot only if its session is dead: the lock is missing, the
   process is gone, **or** the lock has not been touched for `HEARTBEAT_TTL` (180 s; this covers a process id reused after
@@ -232,7 +232,7 @@ changing the format.
 - **Recovery flow.** `app.main` calls `MainWindow.offer_recovery()` right after `show()`: *Recover* / *Discard* /
   *Ask me later* (Esc keeps everything). Recover loads the newest snapshot through `_adopt_project(..., dirty=True)`,
   keeps the original save path if its folder still exists, and deletes the old snapshot only after this session's own
-  snapshot is written (`_recovered_entry`). Older crashed sessions are saved as normal `.vvproj` files in
+  snapshot is written (`_recovered_entry`). Older crashed sessions are saved as normal `.avproj` files in
   `<app data>/Recovered projects/` (`autosave.rescue`). Unreadable snapshots are renamed `*.corrupt` and never offered.
 - **Atomic writes.** `core/fileio.py::atomic_write_text` (temp file, fsync, `os.replace`) is used for snapshots **and**
   for `Project.save`, so a crash or full disk while saving can no longer corrupt the user's project file.
@@ -243,6 +243,6 @@ changing the format.
 
 ## FFmpeg lookup order
 
-1. `VENMA_FFMPEG` / `VENMA_FFPROBE` env vars
+1. `ARCHORD_FFMPEG` / `ARCHORD_FFPROBE` env vars
 2. `<repo>/ffmpeg/` or `<repo>/ffmpeg/bin/`
 3. `PATH`

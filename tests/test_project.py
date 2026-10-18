@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from venma_video.core.project import (
+from archord_video.core.project import (
     MIN_CLIP, NEW_BOTTOM, NEW_TOP, TEXT_MEDIA_ID, TITLE_DEFAULTS, TITLE_PRESETS, TYPED_TRACKS, Clip, MediaItem,
     Project,
 )
@@ -97,7 +97,7 @@ class ProjectTests(unittest.TestCase):
         p = make_project()
         p.add_clip("m1", 1, 0.0)
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "x.vvproj")
+            path = os.path.join(d, "x.avproj")
             p.save(path)
             self.assertEqual(Project.load(path).to_dict(), p.to_dict())
 
@@ -538,7 +538,7 @@ class TypedLayerTests(unittest.TestCase):
 
 class TestPictureTransform(unittest.TestCase):
     def test_fit_box_and_export_filters(self):
-        from venma_video.core import ffmpeg_tools as ft
+        from archord_video.core import ffmpeg_tools as ft
         p = Project(1920, 1080, 30)
         p.media["m1"] = MediaItem("m1", "a.png", "image", 5, 1000, 1000)
         c = Clip("c1", "m1", 0, 0, 0, 2)

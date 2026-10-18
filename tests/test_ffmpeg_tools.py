@@ -1,8 +1,8 @@
 import unittest
 from unittest import mock
 
-from venma_video.core import ffmpeg_tools as ft
-from venma_video.core.project import MediaItem, Project
+from archord_video.core import ffmpeg_tools as ft
+from archord_video.core.project import MediaItem, Project
 
 
 class HelperTests(unittest.TestCase):
@@ -133,7 +133,7 @@ class LayerPreviewTests(unittest.TestCase):
 
 class FindBinaryTests(unittest.TestCase):
     def test_env_var_wins(self):
-        with mock.patch.dict("os.environ", {"VENMA_FFMPEG": __file__}):
+        with mock.patch.dict("os.environ", {"ARCHORD_FFMPEG": __file__}):
             self.assertEqual(ft._find("ffmpeg"), __file__)
 
 

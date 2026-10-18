@@ -8,8 +8,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from venma_video.core import ffmpeg_tools as ft
-from venma_video.core.project import (
+from archord_video.core import ffmpeg_tools as ft
+from archord_video.core.project import (
     DEFAULT_TRANSITION, MAX_TRANSITION, MIN_TRANSITION, Clip, MediaItem, Project,
 )
 
@@ -40,7 +40,7 @@ class TransitionModelTests(unittest.TestCase):
         self.assertEqual(Clip.from_dict(b.to_dict()).transition, b.transition)
 
     def test_all_wipes_are_transitions_and_in_animations_but_not_out_animations(self):
-        from venma_video.core import animation as A
+        from archord_video.core import animation as A
         wipes = ["wipe_left", "wipe_right", "wipe_up", "wipe_down", "wipe_circle"]
         p, a, b = two_clips()
         for w in wipes:
@@ -49,11 +49,11 @@ class TransitionModelTests(unittest.TestCase):
             self.assertIn(w, A.IN_PRESETS)
             self.assertNotIn(w, A.OUT_PRESETS)
             self.assertEqual(A.clean({"out": w, "in": w}), {"in": w})
-        self.assertEqual([n for n, _ in __import__("venma_video.core.project", fromlist=["x"]).TRANSITIONS
+        self.assertEqual([n for n, _ in __import__("archord_video.core.project", fromlist=["x"]).TRANSITIONS
                           if n.startswith("wipe")], wipes)
 
     def test_wipe_progress_is_eased_from_nothing_to_everything(self):
-        from venma_video.core import animation as A
+        from archord_video.core import animation as A
         a = {"in": "wipe_left", "in_dur": 1.0}
         self.assertEqual(A.values_at(a, 4, 0.0)["wipe"], ("left", 0.0))
         self.assertAlmostEqual(A.values_at(a, 4, 0.5)["wipe"][1], 0.5)
@@ -332,7 +332,7 @@ class TransitionUiTests(unittest.TestCase):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
     def window(self):
-        from venma_video.ui.main_window import MainWindow
+        from archord_video.ui.main_window import MainWindow
         w = MainWindow()
         self.addCleanup(self._dispose, w)
         p = w.project
@@ -395,7 +395,7 @@ class TransitionUiTests(unittest.TestCase):
     def test_preview_wipe_region_matches_the_exporter(self):
         from PyQt5.QtCore import QRectF
         from PyQt5.QtGui import QPainterPath
-        from venma_video.ui.preview import wipe_region
+        from archord_video.ui.preview import wipe_region
         f = QRectF(10, 20, 100, 50)
         self.assertEqual(wipe_region(f, "left", 0.25), QRectF(85, 20, 25, 50))          # starts at the right edge
         self.assertEqual(wipe_region(f, "right", 0.25), QRectF(10, 20, 25, 50))

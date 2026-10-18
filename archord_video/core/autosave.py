@@ -6,7 +6,7 @@ Every running copy of the app is a *session* with a random id. While it runs it 
 folder:
 
 * ``<session>.lock``     - says "this session is alive" (its process id; the file is touched every few seconds).
-* ``<session>.vvauto``   - the latest snapshot of the unsaved project (JSON), rewritten atomically.
+* ``<session>.avauto``   - the latest snapshot of the unsaved project (JSON), rewritten atomically.
 
 A normal exit (or a successful Save) removes the snapshot, and a normal exit removes the lock too. If the app
 crashes, is killed or the power goes, the snapshot is left behind with a dead session, and the next start offers to
@@ -25,7 +25,7 @@ from .fileio import atomic_write_text
 
 FOLDER = "Autosave"           # sub-folder of the app data folder
 FORMAT = 1
-AUTOSAVE_EXT = ".vvauto"
+AUTOSAVE_EXT = ".avauto"
 LOCK_EXT = ".lock"
 CORRUPT_EXT = ".corrupt"
 HEARTBEAT_TTL = 180.0          # seconds without a heartbeat before a session is treated as dead
@@ -233,7 +233,7 @@ def export(entry, dest_path):
     atomic_write_text(dest_path, json.dumps(entry.project, indent=1))
 
 
-def rescue(entries, folder, ext=".vvproj"):
+def rescue(entries, folder, ext=".avproj"):
     """Save snapshots as ordinary project files in ``folder`` (never overwriting) and drop them. Returns how many."""
     saved = 0
     try:

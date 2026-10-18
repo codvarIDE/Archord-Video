@@ -1,6 +1,7 @@
-"""Venma Video main window, CapCut-style: one slim top bar, a Media/Text panel, the player and a Details
+"""Archord Video main window, CapCut-style: one slim top bar, a Media/Text panel, the player and a Details
 panel across the top, and the timeline (with its own toolbar) underneath. Panels can be hidden from the View menu; no docking."""
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime
@@ -28,8 +29,9 @@ from .voiceover import HAS_INPUT, VoiceRecorder, VoiceoverDialog
 from .docks import vsep
 from ..workers import MediaWorker, ExportWorker, WaveformWorker
 
+BUILD = "oct18-g"                 # shown in the title bar so it is clear which files are running
 MAX_HISTORY = 100
-PROJECT_EXT = ".vvproj"
+PROJECT_EXT = ".avproj"
 AUTOSAVE_MS = 15000               # how often unsaved work is snapshotted (only when something changed)
 LAYOUT_KEY = "layout2"          # splitter sizes; new key so layouts saved by older versions are ignored
 
@@ -245,10 +247,8 @@ class MainWindow(QMainWindow):
         row.setSpacing(8)
         logo = QLabel()
         logo.setPixmap(theme.app_pixmap(22))
-        brand = QLabel("Venma Video")
-        brand.setObjectName("brandName")
-        row.addWidget(logo)
-        row.addWidget(brand)
+      
+      
         row.addSpacing(10)
 
         clip_items = [self.a_split, self.a_delete, self.a_ripple, self.a_reverse, None,
@@ -312,7 +312,7 @@ class MainWindow(QMainWindow):
         """Show or hide the Media and Details panels to match their View actions, and remember the choice."""
         self.left_frame.setVisible(self.a_view_left.isChecked())
         self.details_frame.setVisible(self.a_view_right.isChecked())
-        st = QSettings("Venma", "VideoEditor")
+        st = QSettings("Archord", "VideoEditor")
         st.setValue(f"{LAYOUT_KEY}/left_on", self.a_view_left.isChecked())
         st.setValue(f"{LAYOUT_KEY}/right_on", self.a_view_right.isChecked())
 
@@ -504,7 +504,7 @@ class MainWindow(QMainWindow):
 
     # ── layout persistence (just the splitter sizes) ─────────────────────────
     def _restore_layout(self):
-        st = QSettings("Venma", "VideoEditor")
+        st = QSettings("Archord", "VideoEditor")
         h, v = st.value(f"{LAYOUT_KEY}/h"), st.value(f"{LAYOUT_KEY}/v")
         ok = h is not None and v is not None and self.hsplit.restoreState(h) and self.vsplit.restoreState(v)
         if not ok:
@@ -515,7 +515,7 @@ class MainWindow(QMainWindow):
         self._apply_panels()
 
     def _save_layout(self):
-        st = QSettings("Venma", "VideoEditor")
+        st = QSettings("Archord", "VideoEditor")
         st.setValue(f"{LAYOUT_KEY}/h", self.hsplit.saveState())
         st.setValue(f"{LAYOUT_KEY}/v", self.vsplit.saveState())
 
@@ -570,10 +570,17 @@ class MainWindow(QMainWindow):
         if not ft.have_ffmpeg():
             QMessageBox.warning(
                 self, "FFmpeg not found",
-                "Venma Video needs FFmpeg (ffmpeg + ffprobe) to import media and export video.\n\n"
+                "Archord Video needs FFmpeg (ffmpeg + ffprobe) to import media and export video.\n\n"
                 "Install it and make sure it is on your PATH:\n"
                 "  • Windows: winget install Gyan.FFmpeg\n  • macOS: brew install ffmpeg\n  • Linux: sudo apt install ffmpeg\n\n"
                 "Or place ffmpeg(.exe) and ffprobe(.exe) in an 'ffmpeg' folder next to the app.")
+        elif ft.ffmpeg_too_old():
+            QMessageBox.warning(
+                self, "FFmpeg is too old",
+                "The FFmpeg being used is very old and will fail on many exports:\n\n" + ft.ffmpeg_info() + "\n\n"
+                "Install a current build (4.4 or newer):\n  • Windows: winget install Gyan.FFmpeg\n\n"
+                "Or put ffmpeg.exe and ffprobe.exe from a current build into an 'ffmpeg' folder next to main.py. "
+                "That folder is used before the one on your PATH.")
         elif not HAS_MULTIMEDIA:
             self.statusBar().showMessage("QtMultimedia not available: the preview plays silently (video and export still work).", 10000)
 
@@ -621,7 +628,7 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Question)
         box.setWindowTitle("Recover your work?")
         box.setTextFormat(Qt.PlainText)
-        box.setText("Venma Video didn't close properly last time.")
+        box.setText("Archord Video didn't close properly last time.")
         box.setInformativeText(f"\"{first.name}\" had unsaved changes, last autosaved {when}.\n\nDo you want to recover them?")
         recover = box.addButton("Recover", QMessageBox.AcceptRole)
         discard = box.addButton("Discard", QMessageBox.DestructiveRole)
@@ -713,7 +720,7 @@ class MainWindow(QMainWindow):
         self._update_clip_panel()
         self._update_labels()
         name = os.path.basename(self.path) if self.path else "Untitled"
-        self.setWindowTitle(f"{name}{'*' if self.dirty else ''} — Venma Video")
+        self.setWindowTitle(f"{name}{'*' if self.dirty else ''} — Archord Video [build {BUILD}]")
         self.project_label.setText(f"{name}{'*' if self.dirty else ''}")
 
     def _update_labels(self):
@@ -821,7 +828,7 @@ class MainWindow(QMainWindow):
         if not HAS_INPUT or not VoiceRecorder.devices():
             QMessageBox.warning(
                 self, "No microphone",
-                "Venma Video couldn't find a microphone.\n\nConnect one (and, on macOS or Windows, allow this app "
+                "Archord Video couldn't find a microphone.\n\nConnect one (and, on macOS or Windows, allow this app "
                 "to use it in the system privacy settings), then try again.")
             return
         p = self.project
@@ -1454,7 +1461,7 @@ class MainWindow(QMainWindow):
     def open_project(self):
         if not self._confirm_discard():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open project", "", f"Venma Video project (*{PROJECT_EXT})")
+        path, _ = QFileDialog.getOpenFileName(self, "Open project", "", f"Archord Video project (*{PROJECT_EXT})")
         if not path:
             return
         try:
@@ -1501,7 +1508,7 @@ class MainWindow(QMainWindow):
         path = self.path
         if save_as or not path:
             path, _ = QFileDialog.getSaveFileName(self, "Save project", self.path or "Untitled" + PROJECT_EXT,
-                                                  f"Venma Video project (*{PROJECT_EXT})")
+                                                  f"Archord Video project (*{PROJECT_EXT})")
             if not path:
                 return False
             if not path.endswith(PROJECT_EXT):
@@ -1554,13 +1561,13 @@ class MainWindow(QMainWindow):
         try:
             text_images = {}
             if any(c.title is not None for c in p.clips):
-                title_dir = tempfile.mkdtemp(prefix="venma_titles_")       # one transparent PNG per title
+                title_dir = tempfile.mkdtemp(prefix="archord_titles_")       # one transparent PNG per title
                 text_images = render_project_titles(p, title_dir)
             rev_dir, prepare = None, None
             if ft.reversed_clips(p):
                 # FFmpeg's reverse filter holds a whole clip in memory, so reversed clips are rendered backwards in
                 # short pieces first (inside the worker, with progress), and the export command is built after that.
-                rev_dir = tempfile.mkdtemp(prefix="venma_rev_")
+                rev_dir = tempfile.mkdtemp(prefix="archord_rev_")
 
                 def prepare(progress, cancelled, p=p, out=out, fmt=fmt, quality=quality, ti=text_images, d=rev_dir, g=gpu):
                     rev = ft.render_reversed_media(p, d, progress=progress, cancelled=cancelled)
@@ -1590,6 +1597,13 @@ class MainWindow(QMainWindow):
                 shutil.rmtree(title_dir, ignore_errors=True)
             if rev_dir:
                 shutil.rmtree(rev_dir, ignore_errors=True)
+            missing = re.search(r"No such filter: '([^']+)'", msg or "")
+            if not ok and missing and missing.group(1) in ft.FILTER_FALLBACKS and missing.group(1) not in ft.MISSING_FILTERS:
+                # this FFmpeg lacks a filter we can work around: remember it and export again without it
+                ft.MISSING_FILTERS.add(missing.group(1))
+                self.statusBar().showMessage(f"This FFmpeg has no '{missing.group(1)}' filter, retrying another way…", 8000)
+                QTimer.singleShot(0, lambda: self._run_export(p, out, fmt, quality, gpu))
+                return
             if ok:
                 QMessageBox.information(self, "Export", f"Saved to\n{out}"
                                         + (f"\n\nEncoded on the GPU ({ft.gpu_label(gpu)})." if gpu else ""))
@@ -1597,7 +1611,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("GPU encoder failed, retrying on the CPU…", 8000)
                 QTimer.singleShot(0, lambda: self._run_export(p, out, fmt, quality, None))
             elif "cancel" not in msg.lower():
-                QMessageBox.critical(self, "Export failed", msg)
+                QMessageBox.critical(self, "Export failed", f"{msg}\n\n{ft.ffmpeg_info()}")
         w.finished_ok.connect(done)
         w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
         self._workers.append(w)

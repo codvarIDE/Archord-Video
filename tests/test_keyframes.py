@@ -4,8 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
-from venma_video.core import ffmpeg_tools as ft
-from venma_video.core.project import KF_SNAP, Clip, Keyframe, MediaItem, Project
+from archord_video.core import ffmpeg_tools as ft
+from archord_video.core.project import KF_SNAP, Clip, Keyframe, MediaItem, Project
 
 
 def _clip(duration=4.0, **kfs):

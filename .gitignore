@@ -81,7 +81,7 @@ $RECYCLE.BIN/
 *.m4a
 *.psd
 # …but keep intentional repo assets
-!venma_video/assets/**
+!archord_video/assets/**
 !docs/**
 
 # ── Logs / env ────────────────────────────────────────

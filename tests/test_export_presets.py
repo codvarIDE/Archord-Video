@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from venma_video.core import ffmpeg_tools as ft
-from venma_video.core.project import (ASPECTS, EXPORT_PRESETS, MediaItem, Project, normalize_color)
+from archord_video.core import ffmpeg_tools as ft
+from archord_video.core.project import (ASPECTS, EXPORT_PRESETS, MediaItem, Project, normalize_color)
 
 
 def _project(w=1080, h=1920, media_wh=(1920, 1080)):
@@ -120,7 +120,7 @@ class CommandTests(unittest.TestCase):
 class RealRenderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.dir = tempfile.mkdtemp(prefix="venma_t_")
+        cls.dir = tempfile.mkdtemp(prefix="archord_t_")
         cls.src = os.path.join(cls.dir, "src.mp4")
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=2",
                         "-f", "lavfi", "-i", "sine=d=2", "-shortest", "-pix_fmt", "yuv420p", cls.src], check=True)

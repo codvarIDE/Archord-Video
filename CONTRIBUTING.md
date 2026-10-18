@@ -1,12 +1,12 @@
 # Contributing
 
-Thanks for helping with Venma Video!
+Thanks for helping with Archord Video!
 
 ## Setup
 
 ```bash
 git clone <your fork>
-cd venma-video
+cd archord-video
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 ```
@@ -24,11 +24,11 @@ Install FFmpeg (see the README) to run the app. Tests don't need FFmpeg or a dis
 
 ## Code guidelines
 
-- Keep `venma_video/core/` free of Qt imports so it stays testable.
+- Keep `archord_video/core/` free of Qt imports so it stays testable.
 - Use relative imports inside the package (`from ..core import ffmpeg_tools as ft`).
 - Colours, fonts and icons come from `ui/theme.py` — don't hard-code them in widgets.
 - New timeline behaviour = a method on `Project` + a test in `tests/test_project.py`.
-- Never commit media files, FFmpeg binaries or `.vvproj` files with personal paths
+- Never commit media files, FFmpeg binaries or `.avproj` files with personal paths
   (the `.gitignore` already blocks most of these).
 
 ## Reporting bugs

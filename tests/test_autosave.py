@@ -7,9 +7,9 @@ import time
 import unittest
 from unittest import mock
 
-from venma_video.core import autosave as au
-from venma_video.core.fileio import atomic_write_text
-from venma_video.core.project import Clip, MediaItem, Project
+from archord_video.core import autosave as au
+from archord_video.core.fileio import atomic_write_text
+from archord_video.core.project import Clip, MediaItem, Project
 
 
 def dead_pid():
@@ -59,7 +59,7 @@ class AtomicWriteTests(TmpDirCase):
     def test_failure_keeps_old_file_and_cleans_up(self):
         path = os.path.join(self._tmp.name, "a.txt")
         atomic_write_text(path, "good")
-        with mock.patch("venma_video.core.fileio.os.replace", side_effect=OSError("disk full")):
+        with mock.patch("archord_video.core.fileio.os.replace", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 atomic_write_text(path, "bad")
         with open(path, encoding="utf-8") as f:
@@ -83,18 +83,18 @@ class AtomicWriteTests(TmpDirCase):
 
 class ProjectSaveTests(TmpDirCase):
     def test_save_load_roundtrip(self):
-        path = os.path.join(self._tmp.name, "p.vvproj")
+        path = os.path.join(self._tmp.name, "p.avproj")
         p = make_project()
         p.save(path)
         q = Project.load(path)
         self.assertEqual(q.to_dict(), p.to_dict())
 
     def test_failed_save_does_not_damage_existing_project(self):
-        path = os.path.join(self._tmp.name, "p.vvproj")
+        path = os.path.join(self._tmp.name, "p.avproj")
         p = make_project()
         p.save(path)
         before = read(path)
-        with mock.patch("venma_video.core.fileio.os.fsync", side_effect=OSError("disk full")):
+        with mock.patch("archord_video.core.fileio.os.fsync", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 p.save(path)
         self.assertEqual(read(path), before)
@@ -104,12 +104,12 @@ class ProjectSaveTests(TmpDirCase):
 class AutosaverTests(TmpDirCase):
     def test_write_and_roundtrip_through_recovery(self):
         p = make_project()
-        self.crashed_session(p, "/home/me/film.vvproj")
+        self.crashed_session(p, "/home/me/film.avproj")
         found = au.find_recoverable(self.dir, exclude_session="another-session")
         self.assertEqual(len(found), 1)
         e = found[0]
-        self.assertEqual(e.project_path, "/home/me/film.vvproj")
-        self.assertEqual(e.name, "film.vvproj")
+        self.assertEqual(e.project_path, "/home/me/film.avproj")
+        self.assertEqual(e.name, "film.avproj")
         self.assertEqual(Project.from_dict(e.project).to_dict(), p.to_dict())
 
     def test_never_saved_project_is_called_untitled(self):
@@ -227,7 +227,7 @@ class AutosaverTests(TmpDirCase):
         p = make_project()
         self.crashed_session(p)
         e = au.find_recoverable(self.dir)[0]
-        out = os.path.join(self._tmp.name, "Recovered.vvproj")
+        out = os.path.join(self._tmp.name, "Recovered.avproj")
         au.export(e, out)
         self.assertEqual(Project.load(out).to_dict(), p.to_dict())
         au.discard(e)
@@ -244,7 +244,7 @@ class AutosaverTests(TmpDirCase):
     def test_write_failure_returns_false_instead_of_raising(self):
         a = au.Autosaver(self.dir)
         a.start()
-        with mock.patch("venma_video.core.autosave.atomic_write_text", side_effect=OSError("disk full")):
+        with mock.patch("archord_video.core.autosave.atomic_write_text", side_effect=OSError("disk full")):
             self.assertFalse(a.write(make_project().to_dict()))
         self.assertIsNotNone(a.last_error)
 
@@ -265,11 +265,11 @@ class SyncAndRescueTests(TmpDirCase):
             self.assertTrue(a.sync(snap, None))
             self.assertTrue(a.sync(snap, None))                        # unchanged: no second write
             self.assertEqual(w.call_count, 1)
-            self.assertTrue(a.sync(snap, "/x/film.vvproj"))            # same project saved elsewhere: rewrite
+            self.assertTrue(a.sync(snap, "/x/film.avproj"))            # same project saved elsewhere: rewrite
             self.assertEqual(w.call_count, 2)
             p = make_project()
             p.add_clip("m1", 1, 20.0)
-            self.assertTrue(a.sync(p.snapshot(), "/x/film.vvproj"))    # edited: rewrite
+            self.assertTrue(a.sync(p.snapshot(), "/x/film.avproj"))    # edited: rewrite
             self.assertEqual(w.call_count, 3)
 
     def test_sync_after_clear_writes_again(self):
@@ -286,7 +286,7 @@ class SyncAndRescueTests(TmpDirCase):
         a = au.Autosaver(self.dir)
         a.start()
         snap = make_project().snapshot()
-        with mock.patch("venma_video.core.autosave.atomic_write_text", side_effect=OSError("disk full")):
+        with mock.patch("archord_video.core.autosave.atomic_write_text", side_effect=OSError("disk full")):
             self.assertFalse(a.sync(snap))
         self.assertTrue(a.sync(snap))
         self.assertEqual(Project.from_dict(json.loads(read(a.path))["project"]).to_dict(),
@@ -296,7 +296,7 @@ class SyncAndRescueTests(TmpDirCase):
         a = au.Autosaver(self.dir)
         a.start()
         p = make_project()
-        a.sync(p.snapshot(), "/x/film.vvproj")
+        a.sync(p.snapshot(), "/x/film.avproj")
         with open(a.lock, "w") as f:                                   # the process dies
             json.dump({"pid": dead_pid()}, f)
         e = au.find_recoverable(self.dir)[0]
@@ -304,7 +304,7 @@ class SyncAndRescueTests(TmpDirCase):
 
     def test_rescue_saves_files_and_never_overwrites(self):
         for _ in range(3):
-            self.crashed_session(project_path="/x/film.vvproj")
+            self.crashed_session(project_path="/x/film.avproj")
         entries = au.find_recoverable(self.dir)
         for e in entries:
             e.saved_at = 1_700_000_000.0                               # identical timestamps: names would clash
@@ -312,7 +312,7 @@ class SyncAndRescueTests(TmpDirCase):
         self.assertEqual(au.rescue(entries, folder), 3)
         names = sorted(os.listdir(folder))
         self.assertEqual(len(names), 3)
-        self.assertTrue(all(n.startswith("film (recovered ") and n.endswith(".vvproj") for n in names))
+        self.assertTrue(all(n.startswith("film (recovered ") and n.endswith(".avproj") for n in names))
         for n in names:
             Project.load(os.path.join(folder, n))                      # each is a valid project file
         self.assertEqual(au.find_recoverable(self.dir), [])            # and nothing is left to offer again
@@ -329,8 +329,8 @@ class SyncAndRescueTests(TmpDirCase):
 class RealCrashTests(TmpDirCase):
     CHILD = (
         "import os, sys\n"
-        "from venma_video.core import autosave as au\n"
-        "from venma_video.core.project import MediaItem, Project\n"
+        "from archord_video.core import autosave as au\n"
+        "from archord_video.core.project import MediaItem, Project\n"
         "a = au.Autosaver(sys.argv[1], session='crashy')\n"
         "a.start()\n"
         "p = Project()\n"

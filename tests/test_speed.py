@@ -10,8 +10,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from venma_video.core import ffmpeg_tools as ft
-from venma_video.core.project import (
+from archord_video.core import ffmpeg_tools as ft
+from archord_video.core.project import (
     MAX_SPEED, MIN_CLIP, MIN_SPEED, Clip, MediaItem, Project,
 )
 
@@ -125,7 +125,7 @@ class SpeedModelTests(unittest.TestCase):
         self.assertAlmostEqual(c.source_time(4.0), 2.0)
 
     def test_reset_effects_does_not_touch_speed(self):
-        from venma_video.core.project import CLIP_DEFAULTS
+        from archord_video.core.project import CLIP_DEFAULTS
         self.assertNotIn("speed", CLIP_DEFAULTS)                # the Reset button would change the clip's length
         self.assertNotIn("reverse", CLIP_DEFAULTS)
 
@@ -488,7 +488,7 @@ class UiTests(unittest.TestCase):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
     def window(self):
-        from venma_video.ui.main_window import MainWindow
+        from archord_video.ui.main_window import MainWindow
         w = MainWindow()
         self.addCleanup(self._dispose, w)
         p = w.project
@@ -595,7 +595,7 @@ class UiTests(unittest.TestCase):
     def test_chunked_preview_stream_delivers_every_frame(self):
         if not HAVE_FFMPEG:
             self.skipTest("ffmpeg not installed")
-        from venma_video.ui.preview import _VideoStream
+        from archord_video.ui.preview import _VideoStream
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         src = os.path.join(tmp, "s.mp4")
@@ -627,7 +627,7 @@ class UiTests(unittest.TestCase):
     def test_export_worker_prepares_reversed_clips_then_renders(self):
         if not HAVE_FFMPEG:
             self.skipTest("ffmpeg not installed")
-        from venma_video.workers import ExportWorker
+        from archord_video.workers import ExportWorker
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         src = os.path.join(tmp, "s.mp4")
@@ -656,7 +656,7 @@ class UiTests(unittest.TestCase):
         self.assertAlmostEqual(probe_duration(out), 3.0, delta=0.2)
 
     def test_export_worker_cancel_during_preparation(self):
-        from venma_video.workers import ExportWorker
+        from archord_video.workers import ExportWorker
         seen = []
 
         def prepare(progress, cancelled):

@@ -11,7 +11,7 @@ try:
 except ImportError:
     HAVE_QT = False
 
-from venma_video.core.project import TITLE_DEFAULTS, Project
+from archord_video.core.project import TITLE_DEFAULTS, Project
 
 
 @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
@@ -19,7 +19,7 @@ class TitleRenderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QGuiApplication.instance() or QGuiApplication([])
-        from venma_video.ui import titles
+        from archord_video.ui import titles
         cls.titles = titles
 
     def style(self, **kw):

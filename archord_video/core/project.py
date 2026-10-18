@@ -1,4 +1,4 @@
-"""Timeline data model for Venma Video (pure Python, no Qt).
+"""Timeline data model for Archord Video (pure Python, no Qt).
 
 Time is in seconds. A clip occupies [start, start + duration) on a track and plays the source
 from ``in_point``. Tracks are listed top-to-bottom as shown in the timeline; for video tracks
