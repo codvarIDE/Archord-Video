@@ -443,6 +443,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
 
     cmd = [exe, "-y", "-v", "error", "-nostdin"]
     vparts, aparts = [], []      # (z-order, label) / label
+    holds = {}                   # input index -> seconds the picture is held past its end (under a transition)
     filters = []
     n = 0
     for c in sorted(project.clips, key=lambda c: (-c.track, c.start)):      # lower tracks first
@@ -450,13 +451,15 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
         draw, sound = _roles(project, c)
         if not draw and not sound:
             continue                                  # hidden picture layer / muted track: nothing to render
+        hold = project.hold_after(c) if draw and m.kind in ("video", "image") else 0.0
+        c = project.render_clip(c)                    # a transition is an In animation on the incoming clip
         src = m.path
         if m.kind == "text":
             src = text_images.get(c.id)
             if not src:
                 raise ValueError("A title has not been rendered to an image for export.")
         if m.kind in ("image", "text"):
-            cmd += ["-loop", "1", "-framerate", str(fps), "-t", _num(c.duration), "-i", src]
+            cmd += ["-loop", "1", "-framerate", str(fps), "-t", _num(c.duration + hold), "-i", src]
         elif c.reverse and c.id in reversed_media:        # already backwards: just read it from the start
             cmd += ["-t", _num(c.span), "-i", reversed_media[c.id]]
         else:
@@ -469,7 +472,10 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             lead = ["reverse"] if inline_reverse else []
             if abs(c.speed - 1.0) > 1e-9 and m.kind not in ("image", "text"):
                 lead.append(f"setpts=(PTS-STARTPTS)/{_n6(c.speed)}")
-            chain = lead + [f"fps={fps}"] + _fit(W, H, c)
+            if hold > 0:
+                holds[i] = hold
+            keep = [f"tpad=stop_mode=clone:stop_duration={_n6(hold)}"] if hold > 0 and m.kind == "video" else []
+            chain = lead + [f"fps={fps}"] + keep + _fit(W, H, c)
             if not moved:
                 chain.append(f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black@0")
             anim = _anim_filters(c)
@@ -499,7 +505,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
     last = "base"
     for k, (i, c) in enumerate(vparts):
         out = f"o{k}"
-        filters.append(f"[{last}][v{i}]overlay=enable='between(t,{_num(c.start)},{_num(c.end)})'[{out}]")
+        filters.append(f"[{last}][v{i}]overlay=enable='between(t,{_num(c.start)},{_num(c.end + holds.get(i, 0.0))})'[{out}]")
         last = out
     filters.append(f"[{last}]format=yuv420p[vout]")
     maps = ["-map", "[vout]"]

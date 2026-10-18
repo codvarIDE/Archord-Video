@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 from . import theme
 from ..core import ffmpeg_tools as ft
 from ..core import animation as anim_core
+from ..core.project import TRANSITIONS
 from ..core import voiceover as vo_core
 from ..core.project import Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS, SPEED_PRESETS, MIN_CLIP
 from .timeline import TimelineWidget, format_tc
@@ -67,7 +68,9 @@ class MainWindow(QMainWindow):
 
         self._reset_history("New Project")
         self._refresh_all()
-        QTimer.singleShot(300, self._check_environment)
+        self._env_timer = QTimer(self, singleShot=True, interval=300)   # parented: dies with the window instead of firing late
+        self._env_timer.timeout.connect(self._check_environment)
+        self._env_timer.start()
 
     # ── actions ──────────────────────────────────────────────────────────────
     def _act(self, text, slot, shortcut=None, icon=None, checkable=False):
@@ -461,6 +464,7 @@ class MainWindow(QMainWindow):
         c.keyframeMoved.connect(self._on_keyframe_moved)
         c.keyframeDeleteRequested.connect(self._on_keyframe_delete)
         self.props.animationEdited.connect(self._on_animation)
+        self.props.transitionEdited.connect(self._on_transition)
         self.props.speedEdited.connect(lambda v: self._apply_speed(v, live=True))
         self.props.reverseEdited.connect(self._on_reverse)
 
@@ -539,6 +543,8 @@ class MainWindow(QMainWindow):
         sid = self.timeline.canvas.selected
         clip = self.project.clip(sid) if sid else None
         self.props.set_clip(clip, self.project.media.get(clip.media_id) if clip else None, self.project.fps)
+        if clip is not None:
+            self.props.load_transition(clip, self.project.transition_prev(clip) is not None)
 
     # ── timeline / engine callbacks ──────────────────────────────────────────
     def _on_time(self, t):
@@ -943,6 +949,46 @@ class MainWindow(QMainWindow):
         if kf is not None:
             self._seek_to_keyframe(kf.t, sid)
 
+    # ── transitions ──────────────────────────────────────────────────────────
+    def _on_transition(self, name, seconds):
+        """The Transition panel picked a style (or "" = none) or moved the duration slider."""
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if c is None:
+            return
+        if self._refuse_locked(sid):
+            self._update_clip_panel()
+            return
+        name = name or None
+        only_duration = name is not None and c.transition.get("type") == name
+        if not self.project.set_transition(sid, name, seconds):
+            self._update_clip_panel()
+            return
+        if only_duration:                                # dragging the duration slider: commit once it settles
+            self.dirty = True
+            self.timeline.canvas.invalidate()
+            self.engine.refresh()
+            self._edit_label = "Change Transition"
+            self._edit_timer.start()
+            return
+        label = dict(TRANSITIONS).get(name, "")
+        self.commit(f"Transition: {label}" if name else "Remove Transition")
+        if name:
+            self._preview_transition(self.project.clip(sid))
+
+    def _preview_transition(self, c):
+        """Play across the cut so the transition that was just picked can be seen, then stop on its own."""
+        tr = self.project.active_transition(c) if c is not None else None
+        if tr is None:
+            self.statusBar().showMessage("Transition set. It shows once another clip on the same layer ends exactly "
+                                         "where this one starts.", 6000)
+            return
+        t0 = max(0.0, c.start - 0.8)
+        self.engine.pause()
+        self.engine.seek(t0)
+        self.engine.play()
+        self._anim_stop.start(int((c.start - t0 + tr[1] + 0.4) * 1000))
+
     # ── speed / reverse ──────────────────────────────────────────────────────
     def _retime_target(self):
         """The selected clip if its speed / direction may change, else None (with a message saying why)."""
@@ -1053,6 +1099,7 @@ class MainWindow(QMainWindow):
             for k, v in CLIP_DEFAULTS.items():
                 setattr(c, k, v)
             c.animation = {}
+            c.transition = {}
             c.clear_keyframes()
             self.props.set_keyframes(c.keyframes)
             self.timeline.canvas.invalidate()

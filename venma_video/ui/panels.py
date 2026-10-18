@@ -14,7 +14,10 @@ from PyQt5.QtWidgets import (
 from . import theme
 from ..core import animation as anim
 from ..core import ffmpeg_tools as ft
-from ..core.project import PRESETS, KEYFRAMED_PROPS, MIN_SPEED, MAX_SPEED, SPEED_PRESETS
+from ..core.project import (
+    PRESETS, KEYFRAMED_PROPS, MIN_SPEED, MAX_SPEED, SPEED_PRESETS, TRANSITIONS, MIN_TRANSITION, MAX_TRANSITION,
+    DEFAULT_TRANSITION,
+)
 from .timeline import MIME_MEDIA, format_tc
 from .docks import CollapsibleSection
 
@@ -319,6 +322,7 @@ class PropertiesPanel(QWidget):
     keyframeSeek = pyqtSignal(float)           # clip-local time: jump the playhead to a keyframe (prev / next / list click)
     animationEdited = pyqtSignal(str, str, float)   # slot ("in" | "out" | "combo"), preset name ("" = none), seconds
     speedEdited = pyqtSignal(float)            # playback speed multiplier chosen in the Speed section (live while dragging)
+    transitionEdited = pyqtSignal(str, float)  # transition name ("" = none), seconds
     reverseEdited = pyqtSignal(bool)           # "Play in reverse" switched on / off
 
     # attribute -> (label, lo, hi, default, scale between slider value and attribute)
@@ -379,6 +383,7 @@ class PropertiesPanel(QWidget):
         theme.set_icon(self.b_reset, "reset", 13)
         self.b_reset.clicked.connect(self.resetRequested.emit)
         lay.addWidget(self.b_reset)
+        self._build_transition_section(lay)
         self._build_animation_section(lay)
 
         # ── Keyframes section ──────────────────────────────────────────────
@@ -446,7 +451,7 @@ class PropertiesPanel(QWidget):
             self.keyframeSeek.emit(float(t))
 
     def retint(self):
-        for sec in (self.text_box, self.sec_speed, self.sec_audio, self.sec_xform, self.sec_visual, self.sec_anim,
+        for sec in (self.text_box, self.sec_speed, self.sec_trans, self.sec_audio, self.sec_xform, self.sec_visual, self.sec_anim,
                     self.sec_kf):
             sec.retint()
         theme.set_icon(self.b_reset, "reset", 13)
@@ -560,6 +565,91 @@ class PropertiesPanel(QWidget):
             return
         self._speed_info.setText(f"Plays {clip.span:.2f} s of the source in {clip.duration:.2f} s"
                                  + (" · backwards" if clip.reverse else ""))
+
+    # ── transition into the clip ────────────────────────────────────────────
+    def _build_transition_section(self, lay):
+        self.sec_trans = CollapsibleSection("Transition")
+        v = self.sec_trans.body_lay
+        host = QWidget()
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 4, 0, 0)
+        grid.setSpacing(5)
+        self._trans_btns = {}
+        for i, (name, label) in enumerate([("", "None")] + list(TRANSITIONS)):
+            b = QToolButton()
+            b.setText(label)
+            b.setCheckable(True)
+            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumHeight(30)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.clicked.connect(lambda _=False, n=name: self._pick_transition(n))
+            grid.addWidget(b, i // 3, i % 3)
+            self._trans_btns[name] = b
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
+        v.addWidget(host)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 2, 0, 0)
+        self._trans_dur = QSlider(Qt.Horizontal)
+        self._trans_dur.setRange(int(MIN_TRANSITION * 10), int(MAX_TRANSITION * 10))     # tenths of a second
+        self._trans_dur.setValue(int(DEFAULT_TRANSITION * 10))
+        self._trans_dur_val = QLabel("0.5 s")
+        self._trans_dur_val.setStyleSheet(f"color: {theme.T['muted']};")
+        self._trans_dur_val.setMinimumWidth(36)
+        self._trans_dur.valueChanged.connect(self._trans_duration_moved)
+        row.addWidget(QLabel("Duration"))
+        row.addWidget(self._trans_dur, 1)
+        row.addWidget(self._trans_dur_val)
+        self._trans_dur_row = QWidget()
+        self._trans_dur_row.setLayout(row)
+        v.addWidget(self._trans_dur_row)
+        self._trans_hint = QLabel("")
+        self._trans_hint.setWordWrap(True)
+        self._trans_hint.setStyleSheet(f"color: {theme.T['muted']}; font-size: 9pt;")
+        v.addWidget(self._trans_hint)
+        lay.addWidget(self.sec_trans)
+
+    def _pick_transition(self, name):
+        if self._loading:
+            return
+        self.transitionEdited.emit(name, self._trans_dur.value() / 10.0)
+        self.load_transition(self._current_clip, self._trans_has_prev)      # re-sync the chips after a re-click
+
+    def _trans_duration_moved(self, v):
+        self._trans_dur_val.setText(f"{v / 10.0:.1f} s")
+        if self._loading:
+            return
+        c = self._current_clip
+        name = (c.transition.get("type") if c is not None else None) or ""
+        if name:
+            self.transitionEdited.emit(name, v / 10.0)
+
+    _trans_has_prev = False
+
+    def load_transition(self, clip, has_prev):
+        """Show the clip's transition. ``has_prev``: a clip on the same layer ends where this one starts (so it shows)."""
+        self._trans_has_prev = bool(has_prev)
+        self._loading = True
+        try:
+            t = clip.transition if clip is not None else {}
+            cur = t.get("type", "")
+            for name, b in self._trans_btns.items():
+                b.setChecked(name == cur)
+            self._trans_dur_row.setEnabled(bool(cur))
+            if cur:
+                self._trans_dur.setValue(int(round(t.get("dur", DEFAULT_TRANSITION) * 10)))
+            self._trans_dur_val.setText(f"{self._trans_dur.value() / 10.0:.1f} s")
+        finally:
+            self._loading = False
+        if has_prev:
+            hint = ""
+        elif clip is not None and clip.transition:
+            hint = ("Not showing yet: another clip on the same layer must end exactly where this one starts. "
+                    "Its last frame is then held under the transition.")
+        else:
+            hint = "Needs another clip on the same layer that ends exactly where this one starts."
+        self._trans_hint.setText(hint)
 
     # ── animation (In / Out / Combo, CapCut style) ──────────────────────────
     ANIM_TABS = (("in", "In"), ("out", "Out"), ("combo", "Combo"))
@@ -785,6 +875,7 @@ class PropertiesPanel(QWidget):
         self.sec_speed.setVisible(speed_on)              # photos and titles have no source to speed up or reverse
         if speed_on:
             self.load_speed(clip)
+        self.sec_trans.setVisible(on and not is_title and media is not None and media.kind in ("video", "image"))
         self.sec_audio.setVisible(not is_title)
         self.sec_xform.setVisible(on and not is_title and media is not None and media.kind in ("video", "image"))
         # Keyframe section: only for visual, non-title clips

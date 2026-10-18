@@ -477,11 +477,20 @@ class UiTests(unittest.TestCase):
         from PyQt5.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    @staticmethod
+    def _dispose(w):
+        """Stop the preview threads and let their queued signals land while the window still exists, THEN delete it
+        (a late "could not decode" message hitting a deleted window would crash the next test)."""
+        from PyQt5.QtCore import QCoreApplication, QEvent
+        w.engine.shutdown()
+        QCoreApplication.processEvents()
+        w.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
     def window(self):
         from venma_video.ui.main_window import MainWindow
         w = MainWindow()
-        self.addCleanup(w.engine.shutdown)
-        self.addCleanup(w.deleteLater)
+        self.addCleanup(self._dispose, w)
         p = w.project
         p.add_media(MediaItem("m1", "/tmp/a.mp4", "video", 10.0, 1920, 1080, 30, True))
         p.add_media(MediaItem("m2", "/tmp/b.png", "image", 5.0, 800, 600))

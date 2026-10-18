@@ -1041,6 +1041,18 @@ class TimelineCanvas(QWidget):
                                          QPointF(r.right() - w, bot - 9)]))
             if c.animation.get("combo"):
                 p.drawRect(QRectF(r.left(), bot - 3, r.width(), 3))
+        if c.transition:                                  # transition into this clip: a bar over its first seconds + a bow-tie
+            prev = self.project.transition_prev(c)
+            live = prev is not None
+            dur = min(c.transition["dur"], c.duration)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 120 if live else 45))
+            p.drawRect(QRectF(r.left(), r.top() + 14, min(r.width(), dur * self.pps), 3))
+            cx, cy, k = r.left(), r.center().y() + 4, 6
+            p.setBrush(QColor(255, 255, 255, 235 if live else 110))
+            p.setPen(QPen(QColor(0, 0, 0, 150), 1))
+            p.drawPolygon(QPolygonF([QPointF(cx, cy), QPointF(cx - k, cy - k), QPointF(cx - k, cy + k)]))
+            p.drawPolygon(QPolygonF([QPointF(cx, cy), QPointF(cx + k, cy - k), QPointF(cx + k, cy + k)]))
         if self.project.track_hidden(c.track):            # hidden layer: the clip fades into the row
             veil = QColor(T["surface"]); veil.setAlpha(165)
             p.fillRect(r, veil)

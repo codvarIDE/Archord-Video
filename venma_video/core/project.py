@@ -93,6 +93,29 @@ def clamp_speed(v):
     return min(MAX_SPEED, max(MIN_SPEED, v))
 
 
+# Transitions (CapCut style). A transition belongs to the INCOMING clip and plays where it meets the clip that ends
+# exactly where it starts on the same layer: the outgoing clip's last frame is held underneath for ``dur`` seconds while
+# the incoming clip's own first ``dur`` seconds animate in over it (dissolve, slide, zoom...). Nothing gets shorter and
+# the project length never changes. The motion is one of the In animations, so preview and export share one definition.
+TRANSITIONS = (("fade", "Dissolve"), ("grow", "Zoom In"), ("swell", "Zoom Out"), ("pop", "Pop"),
+               ("slide_left", "Slide Left"), ("slide_right", "Slide Right"), ("slide_up", "Slide Up"),
+               ("slide_down", "Slide Down"), ("rise", "Rise"), ("fall", "Fall"), ("spin", "Spin"), ("swing", "Swing"))
+TRANSITION_NAMES = tuple(n for n, _ in TRANSITIONS)
+MIN_TRANSITION, MAX_TRANSITION, DEFAULT_TRANSITION = 0.1, 3.0, 0.5
+TRANSITION_TOUCH = 0.05      # two clips "meet" when the gap between them is at most this (seconds)
+
+
+def clean_transition(t):
+    """Normalise a clip's transition dict (``{"type": name, "dur": seconds}``); ``{}`` when there is none."""
+    if not t or t.get("type") not in TRANSITION_NAMES:
+        return {}
+    try:
+        d = float(t.get("dur", DEFAULT_TRANSITION))
+    except (TypeError, ValueError):
+        d = DEFAULT_TRANSITION
+    return {"type": t["type"], "dur": min(MAX_TRANSITION, max(MIN_TRANSITION, d))}
+
+
 # Properties that can be keyframed (animated over time within a clip).
 KEYFRAMED_PROPS = ("pos_x", "pos_y", "scale", "rotation", "opacity")
 # Two keyframes closer than this (seconds) are "the same spot": the playhead counts as standing ON a keyframe
@@ -160,6 +183,7 @@ class Clip:
         # Speed / reverse (not in CLIP_DEFAULTS: "Reset effects" must never change the clip's length).
         self.speed = clamp_speed(props.get("speed", 1.0))
         self.reverse = bool(props.get("reverse", False))
+        self.transition = clean_transition(props.get("transition"))     # into this clip from the one before it
 
     @property
     def end(self):
@@ -196,6 +220,8 @@ class Clip:
             d["speed"] = self.speed
         if self.reverse:
             d["reverse"] = True
+        if self.transition:
+            d["transition"] = dict(self.transition)
         return d
 
     @staticmethod
@@ -433,26 +459,95 @@ class Project:
             pos_x, pos_y, scale = c.pos_x, c.pos_y, c.scale
         return pos_x, pos_y, mw * f * scale / self.width, mh * f * scale / self.height
 
-    def video_clips_at(self, t, include_hidden=False):
+    def video_clips_at(self, t, include_hidden=False, held=True):
         """Every visible picture clip (video / image, not titles) at t, bottom layer first.
 
-        Clips on a hidden layer are left out unless ``include_hidden`` (the preview needs them for sound)."""
-        found = [c for c in self.clips if c.title is None and c.start <= t < c.end
+        Clips on a hidden layer are left out unless ``include_hidden`` (the preview needs them for sound).
+        ``held`` includes a clip whose last frame is being held under a transition (see :meth:`held_clips_at`);
+        pass False when only clips that are really playing count (decoders, sound)."""
+        held_ids = {c.id for c in self.held_clips_at(t)} if held else set()
+        found = [c for c in self.clips if c.title is None and (c.start <= t < c.end or c.id in held_ids)
                  and 0 <= c.track < len(self.tracks) and self.tracks[c.track]["kind"] == "video"
                  and (include_hidden or not self.tracks[c.track].get("hidden"))
                  and self.media[c.media_id].kind in ("video", "image")]
-        return sorted(found, key=lambda c: -c.track)
+        return sorted(found, key=lambda c: (-c.track, c.start))
 
     def visual_clips_at(self, t):
         """Everything painted on the frame at t (pictures AND titles) in true stacking order, bottom first.
 
         A layer further up the timeline is in front of the ones below it; inside one layer clips never overlap.
         """
-        found = [c for c in self.clips if c.start <= t < c.end
+        held_ids = {c.id for c in self.held_clips_at(t)}
+        found = [c for c in self.clips if (c.start <= t < c.end or c.id in held_ids)
                  and 0 <= c.track < len(self.tracks) and self.tracks[c.track]["kind"] == "video"
                  and not self.tracks[c.track].get("hidden")
                  and self.media[c.media_id].kind in VISUAL_KINDS]
         return sorted(found, key=lambda c: (-c.track, c.start))
+
+    # ── transitions ──
+    def transition_prev(self, c):
+        """The clip a transition on ``c`` starts from: the picture clip on the same layer that ends where ``c``
+        starts (within TRANSITION_TOUCH), or None."""
+        if c.title is not None or self.media[c.media_id].kind not in ("video", "image"):
+            return None
+        best = None
+        for o in self.clips:
+            if (o.id != c.id and o.track == c.track and o.title is None and abs(o.end - c.start) <= TRANSITION_TOUCH
+                    and self.media[o.media_id].kind in ("video", "image")):
+                if best is None or abs(o.end - c.start) < abs(best.end - c.start):
+                    best = o
+        return best
+
+    def active_transition(self, c):
+        """``(outgoing clip, seconds)`` if ``c`` has a transition that currently has a clip to start from, else None."""
+        if not c.transition:
+            return None
+        prev = self.transition_prev(c)
+        if prev is None:
+            return None
+        return prev, min(c.transition["dur"], c.duration)
+
+    def transition_next(self, c):
+        """The clip whose active transition starts from ``c`` (``c`` is held under it), or None."""
+        for o in self.clips:
+            if o.transition and o.id != c.id and o.track == c.track:
+                tr = self.active_transition(o)
+                if tr is not None and tr[0].id == c.id:
+                    return o
+        return None
+
+    def hold_after(self, c):
+        """Seconds ``c``'s last frame is held after it ends, because a transition into the next clip plays over it."""
+        o = self.transition_next(c)
+        return self.active_transition(o)[1] if o is not None else 0.0
+
+    def held_clips_at(self, t):
+        """Clips that are over but still shown at ``t``: their last frame sits under an incoming transition."""
+        out = []
+        for o in self.clips:
+            if o.transition and o.start <= t < o.end:
+                tr = self.active_transition(o)
+                if tr is not None and tr[0].end <= t < tr[0].end + tr[1]:
+                    out.append(tr[0])
+        return out
+
+    def render_clip(self, c):
+        """What to draw for ``c``: itself, or a copy whose animation includes its transition. An incoming clip's
+        In animation is the transition (it replaces any In / Combo), and an outgoing clip's Out animation is dropped
+        (its last frame is held, and fading it out would leave the transition playing over black)."""
+        tr = self.active_transition(c)
+        nxt = self.transition_next(c)
+        if tr is None and nxt is None:
+            return c
+        r = copy.copy(c)
+        a = dict(c.animation)
+        if nxt is not None:
+            a = {k: v for k, v in a.items() if not k.startswith("out")}
+        if tr is not None:
+            a = {k: v for k, v in a.items() if k.startswith("out")}
+            a["in"], a["in_dur"] = c.transition["type"], tr[1]
+        r.animation = animation.clean(a)
+        return r
 
     def library(self):
         """Media the user imported (excludes the hidden placeholder that titles use)."""
@@ -845,6 +940,21 @@ class Project:
         if c is None or self.track_locked(c.track) or not c.animation:
             return False
         c.animation = {}
+        return True
+
+    def set_transition(self, clip_id, name, duration=None):
+        """Set (or clear, with ``name`` None) the transition into the clip. It only shows when another clip ends where
+        this one starts on the same layer. Returns True if anything changed."""
+        c = self.clip(clip_id)
+        if c is None or self.track_locked(c.track) or c.title is not None or self.media[c.media_id].kind not in ("video", "image"):
+            return False
+        if name and name not in TRANSITION_NAMES:
+            return False
+        new = clean_transition({"type": name, "dur": duration if duration is not None
+                                else (c.transition.get("dur") or DEFAULT_TRANSITION)}) if name else {}
+        if new == c.transition:
+            return False
+        c.transition = new
         return True
 
     # ── editing ──

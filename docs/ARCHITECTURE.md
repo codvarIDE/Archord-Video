@@ -107,6 +107,24 @@ the export, which builds the same curve as an FFmpeg expression).
   `reverse_selected`, a `Clip` menu, and a badge in `TimelineCanvas._draw_clip`.
 - **Tests.** `tests/test_speed.py` renders a red/green/blue/yellow source and checks which colour shows when.
 
+## Transitions
+
+`Clip.transition = {"type": <In preset>, "dur": seconds}` lives on the **incoming** clip and is saved only when set.
+It is *active* when `Project.transition_prev` finds a picture clip on the same layer ending within `TRANSITION_TOUCH`
+of the clip's start; otherwise it is dormant (kept, not drawn).
+
+- **One definition.** The motion is simply that clip's In animation, so preview and export share `core/animation.py`.
+  `Project.render_clip(c)` returns a copy whose `animation` has the transition baked in (it replaces In / Combo on the
+  incoming clip and drops the Out of the outgoing one, whose held frame must not fade to black). Both renderers draw
+  that copy: `PreviewEngine._stack_now` and `build_export_command`.
+- **The hold.** The outgoing clip stays visible for `hold_after(c)` seconds past its end. `held_clips_at` /
+  `visual_clips_at` / `video_clips_at(held=True)` include it in paint order (below the incoming clip); decoders and
+  sound use `held=False`, and the preview shows its last real frame as a still. Export pads video with
+  `tpad=stop_mode=clone` (photos just loop longer) and widens that clip's overlay `enable` window.
+- **UI.** Transition section in `PropertiesPanel` (`transitionEdited`), `MainWindow._on_transition` (slider drags
+  commit once; picking previews across the cut), bow-tie + duration bar in `TimelineCanvas._draw_clip`.
+- **Tests.** `tests/test_transitions.py` renders red -> green and checks the dissolve is a real crossfade.
+
 ## Layers and the preview
 
 - **Stacking order.** In a typed project every picture layer (video / photo / text clips) is ordered by when it

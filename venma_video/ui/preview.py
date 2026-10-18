@@ -624,7 +624,10 @@ class PreviewEngine(QObject):
 
     def _stack_now(self):
         """Every clip painted on the frame now, bottom first (a layer above is in front of the ones below)."""
-        return self.project.visual_clips_at(self.t) if self.project else []
+        if not self.project:
+            return []
+        p = self.project
+        return [p.render_clip(c) for c in p.visual_clips_at(self.t)]     # transitions are baked into the copies' animation
 
     def _layers_now(self):
         """Picture clips visible now with their on-frame boxes (so they can be picked / moved / resized)."""
@@ -780,7 +783,7 @@ class PreviewEngine(QObject):
         p = self.project
         c = p.audio_clip_at(t)
         if c is None:
-            for v in reversed(p.video_clips_at(t, include_hidden=True)):    # front-most first; hiding a layer keeps its sound
+            for v in reversed(p.video_clips_at(t, include_hidden=True, held=False)):    # front-most first; hiding a layer keeps its sound
                 m = p.media[v.media_id]
                 if m.kind == "video" and m.has_audio and not p.track_muted(v.track):
                     c = v
@@ -796,7 +799,7 @@ class PreviewEngine(QObject):
 
         # video: one decoder per visible video layer; the view paints them in stacking order -------------
         visible = p.video_clips_at(t)
-        want = {c.id: c for c in visible if p.media[c.media_id].kind == "video"}
+        want = {c.id: c for c in visible if p.media[c.media_id].kind == "video" and c.start <= t < c.end}   # not clips only held
         for c in want.values():
             key = self._vkey(c)
             cur = self._vs.get(c.id)
@@ -815,7 +818,7 @@ class PreviewEngine(QObject):
             if p.media[c.media_id].kind == "image":
                 self._ensure_still(c)
         self.view.forget_layers({c.id for c in visible})
-        ahead = {c.id: c for c in p.video_clips_at(t + self.LOOKAHEAD) if p.media[c.media_id].kind == "video"}
+        ahead = {c.id: c for c in p.video_clips_at(t + self.LOOKAHEAD, held=False) if p.media[c.media_id].kind == "video"}
         for c in ahead.values():
             nk = self._vkey(c)
             cur, vn = self._vs.get(c.id), self._vn.get(c.id)
@@ -928,7 +931,7 @@ class PreviewEngine(QObject):
         if m.kind == "image":
             src = 0.0
         else:
-            src = c.source_time(t - c.start)
+            src = c.source_time(min(t - c.start, max(0.0, c.duration - 1.0 / max(1, p.fps))))   # held: its last real frame
             src = min(max(0.0, src), max(0.0, m.duration - 1.0 / max(1, p.fps)))
         return ("L", m.path, round(src * p.fps), w, h, m.kind == "image",
                 round(c.brightness, 3), round(c.contrast, 3), round(c.saturation, 3)), src
