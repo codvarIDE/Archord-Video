@@ -76,6 +76,7 @@ class TimelineCanvas(QWidget):
         super().__init__(parent)
         self.project = None
         self.thumbs = {}            # media id -> QPixmap
+        self.waves = {}             # media path -> core.waveform.Waveform (or None while / if there is none)
         self.pps = 80.0             # pixels per second
         self.scroll = 0.0           # seconds at the left edge of the track area
         self.vscroll = 0.0          # pixels scrolled down (any number of layers fit; the rest scroll)
@@ -944,6 +945,80 @@ class TimelineCanvas(QWidget):
             return d["shift"]
         return 0.0
 
+    WAVE_STEP = 2.0          # pixels per waveform bar
+
+    def _draw_wave(self, p, c, m, r, in_point):
+        """Draw the clip's sound: bars at the height of the loudest sample in each ~2 px slice of the clip.
+
+        Each bar looks up the source time it stands for (``in_point`` plus speed / reverse), so a retimed or slipped
+        clip shows the right part of the waveform; the clip's volume and its fades scale the bars, so what you
+        see is what you hear. Only the visible slice of a long clip is walked."""
+        audio = m.kind == "audio"
+        wf = self.waves.get(m.path)
+        if audio:
+            y0, y1 = r.top() + 15, r.bottom() - 2
+        else:
+            y1 = r.bottom() - 2
+            y0 = y1 - min(18.0, max(0.0, r.height() - 34))         # a strip, so the thumbnails stay readable
+        if y1 - y0 < 6 or r.width() < 3 or (wf is None and not audio):
+            return
+        if wf is None:                                             # still decoding (or no sound): a quiet centre line
+            p.setPen(QPen(QColor(255, 255, 255, 70), 1.5))
+            p.drawLine(QPointF(r.left() + 3, (y0 + y1) / 2), QPointF(r.right() - 3, (y0 + y1) / 2))
+            return
+        step = self.WAVE_STEP
+        x_hi = min(r.right(), float(self.width()))
+        k0 = max(0, int((max(r.left(), HEADER_W) - r.left()) // step))
+        x = r.left() + k0 * step
+        if x >= x_hi:
+            return
+        if not audio:
+            p.fillRect(QRectF(max(r.left(), HEADER_W), y0, x_hi - max(r.left(), HEADER_W), y1 - y0), QColor(0, 0, 0, 80))
+        half = (y1 - y0) / 2
+        mid = (y0 + y1) / 2
+        p.setPen(QPen(QColor(255, 255, 255, 165 if audio else 150), max(1.0, step - 0.6), Qt.SolidLine, Qt.FlatCap))
+        dur, speed, rev = c.duration, c.speed, c.reverse
+        top = in_point + c.span
+
+        def src(tc):                                               # source time shown tc s into the clip
+            tc = min(max(0.0, tc), dur)
+            return top - tc * speed if rev else in_point + tc * speed
+
+        while x < x_hi:
+            ta = (x - r.left()) / self.pps
+            tb = ta + step / self.pps
+            v = wf.peak(src(ta), src(tb)) * c.volume * c.fade_gain((ta + tb) / 2)
+            v = min(1.0, v)
+            cx = x + step / 2
+            if audio:
+                h = max(0.6, v * (half - 1))
+                p.drawLine(QPointF(cx, mid - h), QPointF(cx, mid + h))
+            else:
+                p.drawLine(QPointF(cx, y1), QPointF(cx, y1 - max(0.6, v * (y1 - y0 - 1))))
+            x += step
+
+    def _draw_fades(self, p, c, r):
+        """Audio fade wedges: the part of the clip that is turned down is shaded, with the volume ramp as a line."""
+        fi, fo = c.fades()
+        top, bot = r.top() + 14, r.bottom() - 1
+        shade, line = QColor(255, 255, 255, 40), QPen(QColor(255, 255, 255, 215), 1.5)
+        for w, left_side in ((fi * self.pps, True), (fo * self.pps, False)):
+            w = min(r.width(), w)
+            if w < 1:
+                continue
+            if left_side:
+                tri = QPolygonF([QPointF(r.left(), top), QPointF(r.left() + w, top), QPointF(r.left(), bot)])
+                a, b = QPointF(r.left(), bot), QPointF(r.left() + w, top)
+            else:
+                tri = QPolygonF([QPointF(r.right(), top), QPointF(r.right() - w, top), QPointF(r.right(), bot)])
+                a, b = QPointF(r.right() - w, top), QPointF(r.right(), bot)
+            p.setPen(Qt.NoPen)
+            p.setBrush(shade)
+            p.drawPolygon(tri)
+            p.setPen(line)
+            p.drawLine(a, b)
+        p.setBrush(Qt.NoBrush)
+
     def _draw_clip(self, p, c):
         T = theme.T
         d = self._drag if (self._drag and self._drag["id"] == c.id and self._drag["moved"]) else None
@@ -982,17 +1057,8 @@ class TimelineCanvas(QWidget):
                 p.drawPixmap(QRectF(x, r.top() + 14, tw, ph), th, QRectF(th.rect()))
                 x += tw
             p.setOpacity(1.0)
-        elif m.kind == "audio":
-            p.setPen(QPen(QColor(255, 255, 255, 90), 2))
-            mid, amp = r.center().y() + 6, 9
-            x = r.left() + 4
-            x += max(0, int((HEADER_W - x) // 4)) * 4
-            i = 0
-            while x < min(r.right(), self.width() + 4):
-                h = amp * (0.35 + 0.65 * abs(math.sin((x + in_point * self.pps) * 0.09) * math.cos((x) * 0.031)))
-                p.drawLine(QPointF(x, mid - h), QPointF(x, mid + h))
-                x += 4
-                i += 1
+        if m.kind in ("audio", "video"):                 # the real waveform (a strip along the bottom of a video clip)
+            self._draw_wave(p, c, m, r, in_point)
         fm = QFontMetrics(p.font())
         if c.title is not None:                          # title: show its text in the clip body
             body_txt = " ".join(c.title.get("text", "").split()) or "(empty title)"
@@ -1026,6 +1092,8 @@ class TimelineCanvas(QWidget):
             p.drawRoundedRect(pill, 6, 6)
             p.setPen(QColor(20, 20, 24))
             p.drawText(pill, Qt.AlignCenter, badge)
+        if c.fade_in > 0 or c.fade_out > 0:               # audio fades: shaded wedge + line over the faded part
+            self._draw_fades(p, c, r)
         if c.animation:                                   # In / Out ramps (or a Combo bar) along the clip's bottom edge
             d_in, d_out = anim_core.durations(c.animation, c.duration)
             p.setPen(Qt.NoPen)

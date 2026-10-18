@@ -772,7 +772,8 @@ class PreviewEngine(QObject):
     def _akey(self, c):
         m = self.project.media[c.media_id]
         return (c.id, m.path, round(c.start, 4), round(c.in_point, 4), round(c.duration, 4),
-                round(c.speed, 4), c.reverse, round(c.volume, 3), self._rate, self._ch)
+                round(c.speed, 4), c.reverse, round(c.volume, 3), tuple(round(f, 3) for f in c.fades()),
+                self._rate, self._ch)
 
     def _start_video(self, c, t0):
         m = self.project.media[c.media_id]
@@ -793,13 +794,18 @@ class PreviewEngine(QObject):
     def _start_audio(self, c, t0):
         m = self.project.media[c.media_id]
         rate, ch, s0 = self._rate, self._ch, max(0.0, t0 - c.start)
+        fi, fo = c.fades()
+        fades = (lambda off: (fi, fo, c.duration, off)) if (fi or fo) else (lambda off: None)   # audio fades
         if c.reverse:
+            top = c.in_point + c.span
             def cmd():
                 for lo, hi, _ in ft.reverse_chunks(c, s0, 2.0):
-                    yield ft.audio_stream_cmd(m.path, lo, hi - lo, c.volume, rate, ch, speed=c.speed, reverse=True)
+                    off = (top - hi) / c.speed          # where in the clip this piece starts playing
+                    yield ft.audio_stream_cmd(m.path, lo, hi - lo, c.volume, rate, ch, speed=c.speed, reverse=True,
+                                              fade=fades(off))
         else:
             cmd = ft.audio_stream_cmd(m.path, c.source_time(s0), (c.duration - s0) * c.speed, c.volume,
-                                      rate, ch, speed=c.speed)
+                                      rate, ch, speed=c.speed, fade=fades(s0))
         s = _AudioStream(cmd, self._akey(c), t0, c.end, self)
         s.failed.connect(self.message)
         s.start()

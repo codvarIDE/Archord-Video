@@ -219,9 +219,9 @@ class _SliderRow(QWidget):
     changed = pyqtSignal(float)
     keyframeToggled = pyqtSignal()
 
-    def __init__(self, label, lo, hi, default, unit="%", has_kf=False, parent=None):
+    def __init__(self, label, lo, hi, default, unit="%", has_kf=False, parent=None, div=1):
         super().__init__(parent)
-        self.default, self.unit = default, unit
+        self.default, self.unit, self.div = default, unit, div      # div: slider units per shown unit (10 = tenths)
         self.has_kf = has_kf
         self._kf_active = False
         lay = QGridLayout(self)
@@ -273,15 +273,24 @@ class _SliderRow(QWidget):
         if self.kf_btn:
             self._update_kf_icon(bool(active))
 
+    def _text(self, v):
+        return f"{v}{self.unit}" if self.div == 1 else f"{v / self.div:.1f}{self.unit}"
+
     def _moved(self, v):
-        self.val.setText(f"{v}{self.unit}")
+        self.val.setText(self._text(v))
         self.changed.emit(float(v))
 
     def set_value(self, v):
         self.slider.blockSignals(True)
         self.slider.setValue(int(round(v)))
         self.slider.blockSignals(False)
-        self.val.setText(f"{int(round(v))}{self.unit}")
+        self.val.setText(self._text(int(round(v))))
+
+    def set_maximum(self, hi):
+        """Change the slider's top end without emitting (the value is re-set by the caller)."""
+        self.slider.blockSignals(True)
+        self.slider.setMaximum(max(1, int(hi)))
+        self.slider.blockSignals(False)
 
 
 class _ColorButton(QPushButton):
@@ -324,6 +333,7 @@ class PropertiesPanel(QWidget):
     speedEdited = pyqtSignal(float)            # playback speed multiplier chosen in the Speed section (live while dragging)
     transitionEdited = pyqtSignal(str, float)  # transition name ("" = none), seconds
     reverseEdited = pyqtSignal(bool)           # "Play in reverse" switched on / off
+    fadeEdited = pyqtSignal(str, float)        # audio fade: "in" | "out", seconds (live while dragging)
 
     # attribute -> (label, lo, hi, default, scale between slider value and attribute)
     SPEC = [
@@ -376,6 +386,14 @@ class PropertiesPanel(QWidget):
                 r.keyframeToggled.connect(lambda a=attr: self._toggle_property_kf(a))
             self.rows[attr] = (r, scale)
             (self.sec_audio if attr == "volume" else self.sec_xform if attr in self.XFORM else self.sec_visual).add(r)
+        self.fade_rows = {}                                # audio fades: sliders in tenths of a second
+        for which, label in (("in", "Fade in"), ("out", "Fade out")):
+            r = _SliderRow(label, 0, 100, 0, unit=" s", div=10)
+            r.slider.setToolTip(f"{label}: the sound ramps {'up from' if which == 'in' else 'down to'} silence over "
+                                f"this many seconds (double-click to switch off)")
+            r.changed.connect(lambda v, w=which: None if self._loading else self.fadeEdited.emit(w, v / 10.0))
+            self.fade_rows[which] = r
+            self.sec_audio.add(r)
         lay.addWidget(self.sec_audio)
         lay.addWidget(self.sec_xform)
         lay.addWidget(self.sec_visual)
@@ -890,6 +908,12 @@ class PropertiesPanel(QWidget):
                 shown = clip.props_at(self._t_clip).get(attr) if clip.keyframes and attr in KEYFRAMED_PROPS else None
                 r.set_value((getattr(clip, attr) if shown is None else shown) * scale)
         self.b_reset.setEnabled(on)
+        sounds = on and not is_title and media is not None and (media.kind == "audio" or media.has_audio)
+        for r in self.fade_rows.values():
+            r.setVisible(not is_title)
+            r.setEnabled(bool(sounds))
+        if sounds:
+            self.refresh_fades(clip)
         if not on:
             self.title.setText("No clip selected")
             self.info.setText("Click a clip in the timeline to edit its properties.")
@@ -912,6 +936,13 @@ class PropertiesPanel(QWidget):
         if kf_on:
             self.set_keyframes(clip.keyframes)
         self._sync_kf_slider_icons()
+
+    def refresh_fades(self, clip):
+        """Show the clip's fades (and what is possible for its length) without emitting any edit."""
+        tenths = max(1, int(clip.duration * 10))
+        for which, r in self.fade_rows.items():
+            r.set_maximum(tenths)
+            r.set_value((clip.fade_in if which == "in" else clip.fade_out) * 10)
 
     def set_keyframes(self, keyframes):
         """Refresh the keyframe list widget."""

@@ -24,7 +24,7 @@ from .titles import render_project_titles
 from .panels import fit_tile, MediaBin, TextPanel, PropertiesPanel, ProjectDialog, ExportDialog
 from .voiceover import HAS_INPUT, VoiceRecorder, VoiceoverDialog
 from .docks import vsep
-from ..workers import MediaWorker, ExportWorker
+from ..workers import MediaWorker, ExportWorker, WaveformWorker
 
 MAX_HISTORY = 100
 PROJECT_EXT = ".vvproj"
@@ -40,6 +40,9 @@ class MainWindow(QMainWindow):
         self.path = None
         self.dirty = False
         self.thumbs = {}                 # media id -> QPixmap
+        self.waves = {}                  # media path -> core.waveform.Waveform (None: no sound to draw)
+        self._wave_queue = []            # paths still to decode, one at a time
+        self._wave_worker = None
         self.history, self.labels, self.index = [], [], -1
         self._workers = []
         self._first_import = True
@@ -467,6 +470,7 @@ class MainWindow(QMainWindow):
         self.props.transitionEdited.connect(self._on_transition)
         self.props.speedEdited.connect(lambda v: self._apply_speed(v, live=True))
         self.props.reverseEdited.connect(self._on_reverse)
+        self.props.fadeEdited.connect(self._on_fade)
 
     # ── environment ──────────────────────────────────────────────────────────
     def _check_environment(self):
@@ -518,6 +522,7 @@ class MainWindow(QMainWindow):
     # ── refresh ──────────────────────────────────────────────────────────────
     def _refresh_all(self, rebuild_bin=False):
         self.timeline.canvas.thumbs = self.thumbs
+        self.timeline.canvas.waves = self.waves
         self.engine.thumbs = self.thumbs
         self.timeline.canvas.set_project(self.project)
         self.engine.set_project(self.project, reset=rebuild_bin)
@@ -662,6 +667,7 @@ class MainWindow(QMainWindow):
         if created and c.track != track and p.track_is_empty(track):
             p.remove_track(track)                        # the take had to go elsewhere; drop the unused new track
         self.commit("Record Voiceover")
+        self._request_waves([item])                      # the take gets a real waveform on its clip
         canvas.select(c.id)
         canvas.ensure_track_visible(c.track)
         self.engine.seek(c.end)
@@ -1006,6 +1012,55 @@ class MainWindow(QMainWindow):
             return None
         return c
 
+    def _on_fade(self, which, seconds):
+        """The Fade in / Fade out slider moved: change the selected clip's audio fade. Like the speed slider, the
+        result shows (and plays) at once and the undo step is recorded when the drag settles."""
+        sid = self.timeline.canvas.selected
+        c = self.project.clip(sid) if sid else None
+        if c is None:
+            return
+        if self._refuse_locked(sid):
+            self._update_clip_panel()                    # put the sliders back
+            return
+        changed = self.project.set_fade(sid, which, seconds)
+        self.props.refresh_fades(c)                      # shows what was really set (the fades can't overlap)
+        if not changed:
+            return
+        self.dirty = True
+        self.timeline.canvas.invalidate()
+        self._update_labels()
+        self.engine.refresh()
+        self._edit_label = "Change Fade"
+        self._edit_timer.start()
+
+    # ── waveforms ────────────────────────────────────────────────────────────
+    def _request_waves(self, items):
+        """Decode the waveform of every audio file / video with sound in ``items`` that has none yet."""
+        for m in items:
+            if (m.kind == "audio" or (m.kind == "video" and m.has_audio)) and m.path not in self.waves \
+                    and m.path not in self._wave_queue and os.path.isfile(m.path):
+                self._wave_queue.append(m.path)
+        self._next_wave()
+
+    def _next_wave(self):
+        if self._wave_worker is not None or not self._wave_queue or not ft.have_ffmpeg():
+            return
+        w = WaveformWorker(self._wave_queue.pop(0), self)
+        w.ready.connect(self._on_wave_ready)
+        w.finished.connect(self._wave_done)
+        self._wave_worker = w
+        w.start()
+
+    def _on_wave_ready(self, path, wf):
+        self.waves[path] = wf
+        self.timeline.canvas.invalidate()
+
+    def _wave_done(self):
+        w, self._wave_worker = self._wave_worker, None
+        if w is not None:
+            w.deleteLater()
+        self._next_wave()
+
     def _apply_speed(self, value, live):
         """Change the selected clip's speed. ``live`` is the slider being dragged: the result shows at once and the
         undo step is recorded when the drag settles; otherwise (menu, chip) it is one undo step right away."""
@@ -1163,6 +1218,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Project set to match first clip: {p.width}×{p.height} @ {p.fps} fps", 6000)
         w.added += 1
         self._last_import = item.id
+        self._request_waves([item])
         self.media_bin.add_item(item, fit_tile(self.thumbs[item.id]) if item.id in self.thumbs else None)
 
     # ── project files ────────────────────────────────────────────────────────
@@ -1216,6 +1272,8 @@ class MainWindow(QMainWindow):
         missing = [m.name for m in proj.library() if not os.path.isfile(m.path)]
         if missing:
             QMessageBox.warning(self, "Missing media", "These files could not be found:\n\n" + "\n".join(missing[:15]))
+        self.waves.clear()
+        self._request_waves(proj.library())
         jobs = [dict(path=m.path, probe=False, kind=m.kind, duration=m.duration)
                 for m in proj.library() if os.path.isfile(m.path) and m.kind != "audio"]
         if jobs and ft.have_ffmpeg():
@@ -1346,6 +1404,10 @@ class MainWindow(QMainWindow):
             return
         self._save_layout()
         self.engine.shutdown()
+        self._wave_queue.clear()
+        if self._wave_worker is not None:
+            self._wave_worker.stop()
+            self._wave_worker.wait(2000)
         for w in list(self._workers):
             if isinstance(w, ExportWorker):
                 w.cancel()

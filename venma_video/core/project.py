@@ -93,6 +93,21 @@ def clamp_speed(v):
     return min(MAX_SPEED, max(MIN_SPEED, v))
 
 
+# Audio fades (CapCut style). ``fade_in`` / ``fade_out`` are TIMELINE seconds over which a clip's sound ramps up from
+# silence at its start / down to silence at its end (linear). They apply to audio clips and to video clips that have
+# sound, are saved only when set, and are deliberately *not* in CLIP_DEFAULTS ("Reset effects" leaves them alone).
+# A clip never fades for longer than it plays: see ``Clip.fades``.
+MAX_FADE = 60.0
+
+
+def clamp_fade(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(MAX_FADE, max(0.0, v)) if v == v else 0.0          # v != v: NaN
+
+
 # Transitions (CapCut style). A transition belongs to the INCOMING clip and plays where it meets the clip that ends
 # exactly where it starts on the same layer: the outgoing clip's last frame is held underneath for ``dur`` seconds while
 # the incoming clip's own first ``dur`` seconds animate in over it (dissolve, slide, zoom, wipe...). Nothing gets shorter and
@@ -186,6 +201,8 @@ class Clip:
         self.speed = clamp_speed(props.get("speed", 1.0))
         self.reverse = bool(props.get("reverse", False))
         self.transition = clean_transition(props.get("transition"))     # into this clip from the one before it
+        self.fade_in = clamp_fade(props.get("fade_in", 0.0))            # audio fade-in / fade-out, seconds
+        self.fade_out = clamp_fade(props.get("fade_out", 0.0))
 
     @property
     def end(self):
@@ -208,6 +225,29 @@ class Clip:
             return self.in_point + self.span - t_clip * self.speed
         return self.in_point + t_clip * self.speed
 
+    # ── audio fades ─────────────────────────────────────────────────────────
+    def fades(self):
+        """``(fade_in, fade_out)`` in seconds as they actually play: together they never exceed the clip's length
+        (when they would, both shrink in proportion), so trimming or speeding a clip up never breaks them."""
+        fi, fo = self.fade_in, self.fade_out
+        if fi + fo > self.duration > 0:
+            k = self.duration / (fi + fo)
+            fi, fo = fi * k, fo * k
+        elif self.duration <= 0:
+            return 0.0, 0.0
+        return fi, fo
+
+    def fade_gain(self, t_clip):
+        """Volume factor (0..1) the fades give ``t_clip`` seconds into the clip (1.0 outside both fades)."""
+        fi, fo = self.fades()
+        g = 1.0
+        if fi > 1e-9 and t_clip < fi:
+            g *= max(0.0, t_clip) / fi
+        left = self.duration - t_clip
+        if fo > 1e-9 and left < fo:
+            g *= max(0.0, left) / fo
+        return g
+
     def to_dict(self):
         d = dict(id=self.id, media_id=self.media_id, track=self.track, start=self.start,
                  in_point=self.in_point, duration=self.duration)
@@ -224,6 +264,10 @@ class Clip:
             d["reverse"] = True
         if self.transition:
             d["transition"] = dict(self.transition)
+        if self.fade_in > 1e-9:                        # old project files simply don't have these keys
+            d["fade_in"] = self.fade_in
+        if self.fade_out > 1e-9:
+            d["fade_out"] = self.fade_out
         return d
 
     @staticmethod
@@ -973,7 +1017,8 @@ class Project:
             right_in, c_in = c.in_point + (t - c.start) * c.speed, c.in_point
         right = Clip(self._new_id("c"), c.media_id, c.track, t, right_in, c.end - t,
                      title=None if c.title is None else dict(c.title), speed=c.speed, reverse=c.reverse,
-                     **{k: getattr(c, k) for k in CLIP_DEFAULTS})
+                     fade_out=c.fade_out, **{k: getattr(c, k) for k in CLIP_DEFAULTS})
+        c.fade_out = 0.0                    # the fade-in stays on the left half, the fade-out moves to the right half
         c.in_point = c_in
         # Distribute keyframes: left keeps those before the cut, right gets those at/after (offset adjusted)
         # (like CapCut, both halves get a keyframe on the cut holding the value the motion had there, so the
@@ -1035,6 +1080,32 @@ class Project:
         if c.reverse == flag:
             return False
         c.reverse = flag
+        return True
+
+    # ── audio fades ──
+    def can_fade(self, clip_id):
+        """True for clips that make sound: audio clips and video clips whose file has an audio stream."""
+        c = self.clip(clip_id)
+        if c is None:
+            return False
+        m = self.media[c.media_id]
+        return m.kind == "audio" or (m.kind == "video" and m.has_audio)
+
+    def set_fade(self, clip_id, which, seconds):
+        """Set the clip's fade ``which`` (``"in"`` or ``"out"``) to ``seconds``. The two fades can't overlap, so the
+        value is capped at what is left of the clip after the other fade. Returns True if anything changed."""
+        c = self.clip(clip_id)
+        if which not in ("in", "out"):
+            raise ValueError("which must be 'in' or 'out'")
+        if c is None or self.track_locked(c.track) or not self.can_fade(clip_id):
+            return False
+        other = c.fade_out if which == "in" else c.fade_in
+        new = min(clamp_fade(seconds), max(0.0, c.duration - min(other, c.duration)))
+        new = 0.0 if new < 0.01 else round(new, 3)        # tiny values are "off" (and keep the saved file tidy)
+        attr = "fade_in" if which == "in" else "fade_out"
+        if abs(getattr(c, attr) - new) < 1e-9:
+            return False
+        setattr(c, attr, new)
         return True
 
     def trim_limits(self, clip_id):

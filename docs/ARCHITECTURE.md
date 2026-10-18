@@ -107,6 +107,38 @@ the export, which builds the same curve as an FFmpeg expression).
   `reverse_selected`, a `Clip` menu, and a badge in `TimelineCanvas._draw_clip`.
 - **Tests.** `tests/test_speed.py` renders a red/green/blue/yellow source and checks which colour shows when.
 
+## Waveforms and audio fades
+
+- **Fades are clip data.** `Clip.fade_in` / `Clip.fade_out` are timeline seconds, saved only when set and (like speed)
+  not in `CLIP_DEFAULTS`, so "Reset effects" leaves them alone. `Clip.fades()` returns what actually plays: the two
+  never exceed the clip's length (they shrink in proportion if they would), so trimming or speeding a clip up needs no
+  fix-up and the values the user chose come back if the clip grows again. `Clip.fade_gain(t)` is the same curve
+  (linear) in Python, used by the timeline drawing and the tests. `Project.can_fade` (audio clips and video clips whose
+  file has sound) and `Project.set_fade(id, "in" | "out", seconds)` (lock-aware, caps the value at what the other
+  fade leaves, tiny values mean off). `Project.split` keeps the fade-in on the left half and moves the fade-out to the
+  right half.
+- **One definition, two renderers.** `ffmpeg_tools.fade_filters(fade_in, fade_out, duration, offset)` builds the `afade`
+  filters. The exporter puts them after speed / reverse and `volume`, before `adelay`, so they run in the clip's own
+  timeline. The preview's `audio_stream_cmd(..., fade=(fi, fo, clip_duration, offset))` uses the same function; the
+  stream may start mid-clip (a seek, or a later piece of a reversed clip), so `offset` starts a fade-in at the gain it
+  would have reached there (`silence=`) and a fade-out already under way at its current gain (`unity=`). The preview's
+  stream key includes the fades, so moving a slider restarts the sound with the new ramp.
+- **Waveforms.** `core/waveform.py` has no Qt. `decode(path)` runs `ffmpeg_tools.waveform_cmd` (mono, 4 kHz PCM) and
+  folds it into one byte per 20 ms (`PEAKS_PER_SEC = 50`), reading ~12 s at a time so memory stays flat on long files.
+  `Waveform.peak(t0, t1)` / `bins` return the loudest peak in any source range, in either order, so the timeline can
+  draw at any zoom without decoding again. `WaveformWorker` decodes one file in a thread; `MainWindow._request_waves`
+  queues files (after import, a voiceover take, or opening a project) and runs the workers one after another. Results
+  live in `MainWindow.waves` (media path -> `Waveform`, `None` when the file has no sound) and are shared with the
+  timeline canvas.
+- **Timeline.** `TimelineCanvas._draw_wave` walks only the visible bars (2 px each); each bar maps its clip time to
+  source time with the clip's speed / reverse / in-point and is scaled by `Clip.volume` and `fade_gain`. Audio clips
+  fill the body, video clips get a strip along the bottom. `_draw_fades` shades the faded part with the ramp line.
+- **UI.** Audio section of `PropertiesPanel`: two sliders in tenths of a second (`fadeEdited`; the maximum follows the
+  clip's length). `MainWindow._on_fade` is like the speed slider: the change shows and plays at once and the undo step
+  ("Change Fade") is recorded when the drag settles.
+- **Tests.** `tests/test_audio_fades.py`, including real renders: the export is run losslessly and the level of a tone is
+  measured along the clip, as are preview streams that start in the middle of a fade and reversed preview pieces.
+
 ## Transitions
 
 `Clip.transition = {"type": <In preset>, "dur": seconds}` lives on the **incoming** clip and is saved only when set.

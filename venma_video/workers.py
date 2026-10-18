@@ -8,6 +8,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
 from .core import ffmpeg_tools as ft
+from .core import waveform
 
 
 class MediaWorker(QThread):
@@ -46,6 +47,30 @@ class MediaWorker(QThread):
             futures = [pool.submit(self._one, j) for j in self.jobs]
             for f in futures:
                 self.ready.emit(*f.result())
+
+
+class WaveformWorker(QThread):
+    """Decode one file's sound into timeline waveform peaks without blocking the UI.
+
+    Emits ``ready(path, Waveform_or_None)`` once (``None`` when the file has no decodable sound). The main window
+    runs these one after another, so importing a hundred files never starts a hundred decoders at once."""
+    ready = pyqtSignal(str, object)
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            wf = waveform.decode(self.path, cancelled=lambda: self._stop)
+        except Exception:               # no audio stream, unreadable file...: the clip just shows no waveform
+            wf = None
+        if not self._stop:
+            self.ready.emit(self.path, wf)
 
 
 class ExportWorker(QThread):

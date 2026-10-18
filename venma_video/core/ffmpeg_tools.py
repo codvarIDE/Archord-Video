@@ -169,6 +169,41 @@ def _atempo_chain(speed):
     return out
 
 
+def fade_filters(fade_in, fade_out, duration, offset=0.0):
+    """``afade`` filters for a clip's audio fades (linear), for sound that starts ``offset`` seconds into the clip.
+
+    ``fade_in`` / ``fade_out`` are the clip's *effective* fades (``Clip.fades()``) and ``duration`` its timeline
+    length. Apply them after speed / reverse, i.e. to sound already running in timeline time. ``offset`` is 0 for an
+    export; the preview starts mid-clip (a seek, or a later reversed piece) and so must start mid-ramp: the fade-in
+    begins at the gain it would have reached there (``silence``) and a fade-out already under way begins at its
+    current gain (``unity``) and finishes with the clip, so what you hear is the same curve either way.
+    """
+    out = []
+    off = max(0.0, float(offset))
+    if fade_in > 1e-3 and off < fade_in - 1e-3:
+        f = f"afade=t=in:st=0:d={_n6(fade_in - off)}"
+        if off > 1e-3:
+            f += f":silence={_n6(off / fade_in)}"
+        out.append(f)
+    if fade_out > 1e-3 and off < duration - 1e-3:
+        start = duration - fade_out                   # clip time at which the fade-out begins
+        if off >= start:
+            left = duration - off
+            out.append(f"afade=t=out:st=0:d={_n6(left)}:unity={_n6(min(1.0, left / fade_out))}")
+        else:
+            out.append(f"afade=t=out:st={_n6(start - off)}:d={_n6(fade_out)}")
+    return out
+
+
+def waveform_cmd(path):
+    """ffmpeg argv that decodes ``path``'s sound to mono 16-bit PCM (4 kHz is plenty for peaks) on stdout."""
+    exe = ffmpeg_path()
+    if not exe:
+        raise RuntimeError("ffmpeg not found")
+    return [exe, "-v", "error", "-nostdin", "-i", path, "-vn", "-sn", "-dn", "-ac", "1", "-ar", "4000",
+            "-f", "s16le", "-"]
+
+
 def _is_retimed(clip):
     return clip is not None and (getattr(clip, "reverse", False) or abs(getattr(clip, "speed", 1.0) - 1.0) > 1e-9)
 
@@ -539,8 +574,9 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
         if sound:
             delay = int(round(c.start * 1000))
             alead = (["areverse"] if inline_reverse else []) + _atempo_chain(c.speed)
-            filters.append(f"[{i}:a]{','.join(alead + ['aresample=48000', 'aformat=channel_layouts=stereo'])},"
-                           f"volume={_num(c.volume)},adelay={delay}|{delay}[a{i}]")
+            fades = fade_filters(*c.fades(), c.duration)           # after speed / reverse: the clip's own timeline
+            tail = [f"volume={_num(c.volume)}"] + fades + [f"adelay={delay}|{delay}"]
+            filters.append(f"[{i}:a]{','.join(alead + ['aresample=48000', 'aformat=channel_layouts=stereo'] + tail)}[a{i}]")
             aparts.append(i)
 
     filters.insert(0, f"color=c=black:s={W}x{H}:r={fps}:d={_num(total)},format=rgba[base]")
@@ -612,15 +648,19 @@ def video_stream_cmd(path, src_start, duration, w, h, fps, clip=None):
             "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
 
 
-def audio_stream_cmd(path, src_start, duration, volume=1.0, rate=48000, channels=2, speed=1.0, reverse=False):
+def audio_stream_cmd(path, src_start, duration, volume=1.0, rate=48000, channels=2, speed=1.0, reverse=False,
+                     fade=None):
     """ffmpeg argv that writes raw signed 16-bit little-endian PCM to stdout.
 
     ``src_start`` / ``duration`` are SOURCE seconds; ``speed`` changes the tempo (pitch is kept) and ``reverse``
-    plays that range backwards."""
+    plays that range backwards. ``fade`` is ``(fade_in, fade_out, clip_duration, offset)`` (see
+    :func:`fade_filters`) when the clip has audio fades; ``offset`` is where in the clip this stream starts."""
     exe = ffmpeg_path()
     if not exe:
         raise RuntimeError("ffmpeg not found")
     af = (["areverse"] if reverse else []) + _atempo_chain(speed) + [f"volume={_num(volume)}"]
+    if fade:
+        af += fade_filters(*fade)
     return [exe, "-v", "error", "-nostdin", "-ss", f"{max(0.0, src_start):.3f}", "-t", f"{max(0.05, duration):.3f}",
             "-i", path, "-vn", "-sn", "-af", ",".join(af),
             "-ac", str(channels), "-ar", str(rate), "-f", "s16le", "-"]
