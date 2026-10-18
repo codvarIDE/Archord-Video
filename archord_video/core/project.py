@@ -22,6 +22,7 @@ TEXT_KIND = "text"
 TEXT_MEDIA_ID = "mtext"
 STILL_KINDS = ("image", TEXT_KIND)       # single-frame / generated kinds: no source range, any length
 TEXT_DEFAULT_DURATION = 4.0
+FREEZE_DURATION = 3.0                    # seconds a freeze frame lasts on the timeline
 
 # Text styling lives on the clip. Sizes are in pixels for a 1080-pixel-high frame and scale with the
 # frame; pos_x / pos_y place the centre of the text box as a fraction of the frame (0..1).
@@ -1316,6 +1317,113 @@ class Project:
             track = c.track
         c.track = track
         c.start = self.resolve_start(track, start, c.duration, ignore=clip_id)
+
+    # ── detach audio / freeze frame ──
+    def can_detach_audio(self, clip_id):
+        """True for a video clip with sound that isn't muted yet and sits on an unlocked layer."""
+        c = self.clip(clip_id)
+        if c is None or self.track_locked(c.track):
+            return False
+        m = self.media[c.media_id]
+        return m.kind == "video" and m.has_audio and c.volume > 1e-9
+
+    def detach_audio(self, clip_id):
+        """Move a video clip's sound onto an audio track (same timing, speed, direction, volume and fades) and
+        mute the video. Returns the new audio clip, or None when :meth:`can_detach_audio` is False."""
+        if not self.can_detach_audio(clip_id):
+            return None
+        c = self.clip(clip_id)
+        m = self.media[c.media_id]
+        item = next((x for x in self.media.values() if x.kind == "audio" and x.path == m.path), None)
+        if item is None:                              # the same file again, seen as sound only (audio layers take audio)
+            item = self.add_media(MediaItem(self.new_media_id(), m.path, "audio", m.duration, has_audio=True))
+        track = self.find_layer("audio", self.first_track_for("audio"), c.start, c.duration)
+        a = Clip(self._new_id("c"), item.id, track, c.start, c.in_point, c.duration, volume=c.volume,
+                 speed=c.speed, reverse=c.reverse, fade_in=c.fade_in, fade_out=c.fade_out)
+        self.clips.append(a)
+        c.volume, c.fade_in, c.fade_out = 0.0, 0.0, 0.0
+        return a
+
+    def freeze_source(self, t, prefer=None):
+        """The video clip whose frame a freeze at ``t`` captures: the preferred (selected) clip if it is under the
+        playhead, else the top-most visible video clip there. None when there is none."""
+        def ok(c):
+            return (self.media[c.media_id].kind == "video" and c.start - 1e-9 <= t <= c.end + 1e-9
+                    and not self.track_hidden(c.track))
+        p = self.clip(prefer) if prefer else None
+        if p is not None and ok(p):
+            return p
+        return min((c for c in self.clips if ok(c) and t < c.end - 1e-9), key=lambda c: c.track, default=None) \
+            or min((c for c in self.clips if ok(c)), key=lambda c: c.track, default=None)
+
+    def add_freeze_frame(self, clip_id, t, image_path, duration=FREEZE_DURATION):
+        """Add a still clip of ``duration`` s at ``t`` showing ``image_path`` (a frame grabbed from clip ``clip_id``)
+        with that clip's look at that moment (position, scale, rotation, opacity, colour). It goes in front on a
+        free layer; the video itself is left untouched."""
+        src = self.clip(clip_id)
+        sm = self.media[src.media_id]
+        item = next((x for x in self.media.values() if x.kind == "image" and x.path == image_path), None)
+        if item is None:
+            item = self.add_media(MediaItem(self.new_media_id(), image_path, "image", IMAGE_DEFAULT_DURATION,
+                                            sm.width, sm.height))
+        new = self.place_clip(item.id, None, max(0.0, t), duration)
+        look = src.props_at(min(max(0.0, t - src.start), src.duration))
+        for k in ("brightness", "contrast", "saturation"):
+            setattr(new, k, getattr(src, k))
+        for k in KEYFRAMED_PROPS:
+            setattr(new, k, look[k])
+        return new
+
+    # ── copy / paste ──
+    def copy_clips(self, clip_ids):
+        """A detached snapshot of clips (with the media they use) for :meth:`paste_clips`; None if there are none."""
+        cs = sorted((c for c in map(self.clip, clip_ids) if c is not None), key=lambda c: (c.start, c.track))
+        if not cs:
+            return None
+        return copy.deepcopy(dict(clips=[c.to_dict() for c in cs],
+                                  media={c.media_id: self.media[c.media_id].to_dict() for c in cs}))
+
+    def _paste_media(self, mid, md):
+        """Id of the media item a pasted clip should use: the same file already in the project, else a re-added copy."""
+        have = self.media.get(mid)
+        if have is not None and have.path == md["path"] and have.kind == md["kind"]:
+            return mid
+        if md["kind"] == TEXT_KIND:
+            if TEXT_MEDIA_ID not in self.media:
+                self.media[TEXT_MEDIA_ID] = MediaItem(TEXT_MEDIA_ID, "", TEXT_KIND, TEXT_DEFAULT_DURATION)
+            return TEXT_MEDIA_ID
+        for m in self.media.values():
+            if m.path == md["path"] and m.kind == md["kind"]:
+                return m.id
+        return self.add_media(MediaItem.from_dict(dict(md, id=self.new_media_id()))).id
+
+    def paste_clips(self, data, t):
+        """Add copies of ``data`` (from :meth:`copy_clips`) so the earliest one starts at ``t``, keeping their spacing.
+        Each clip keeps its layer when it fits there, otherwise it goes on the first free layer (new layers are made
+        as needed). Fades, keyframes, speed, animation and effects are kept; a transition is not (it belongs to the
+        neighbouring clip it was set against). Returns the new clips in timeline order."""
+        if not data or not data.get("clips"):
+            return []
+        items = sorted(copy.deepcopy(data["clips"]), key=lambda d: (d["start"], d["track"]))
+        shift = max(0.0, t) - min(d["start"] for d in items)
+        remap = {mid: self._paste_media(mid, md) for mid, md in data.get("media", {}).items()}
+        new = []
+        for d in items:
+            mid = remap.get(d["media_id"], d["media_id"])
+            if mid not in self.media:
+                continue
+            kind, start, dur, orig = self.media[mid].kind, max(0.0, d["start"] + shift), d["duration"], d["track"]
+            if (0 <= orig < len(self.tracks) and self.track_accepts(orig, kind) and not self.track_locked(orig)
+                    and self.is_free(orig, start, dur)):
+                track = orig
+            else:
+                track = self.find_layer(kind, min(max(orig, 0), len(self.tracks) - 1), start, dur, auto=True)
+            d.pop("transition", None)
+            d.update(id=self._new_id("c"), media_id=mid, track=track, start=start)
+            c = Clip.from_dict(d)
+            self.clips.append(c)
+            new.append(c)
+        return new
 
     def group_move_limits(self, clip_ids):
         """(lo, hi) range of the time shift that moves all of ``clip_ids`` together without leaving 0 or

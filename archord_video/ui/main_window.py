@@ -20,6 +20,7 @@ from ..core import animation as anim_core
 from ..core.project import TRANSITIONS
 from ..core import voiceover as vo_core
 from ..core import autosave as autosave_core
+from ..core import freeze as freeze_core
 from ..core.project import ASPECTS, Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS, SPEED_PRESETS, MIN_CLIP
 from .timeline import TimelineWidget, format_tc
 from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
@@ -127,7 +128,12 @@ class MainWindow(QMainWindow):
         self.a_split2 = A("Split at Playhead (alt)", self.split_at_playhead, "Ctrl+K")
         self.a_delete = A("&Delete Clip", lambda: self.delete_selected(False), "Delete", "trash")
         self.a_ripple = A("&Ripple Delete", lambda: self.delete_selected(True), "Shift+Delete", "ripple_delete")
+        self.a_copy = A("&Copy Clips", self.copy_selected, "Ctrl+C")
+        self.a_paste = A("&Paste Clips at Playhead", self.paste_clips, "Ctrl+V")
+        self.a_dup = A("D&uplicate Clips", self.duplicate_selected, "Ctrl+D")
         self.a_reverse = A("&Reverse Clip", self.reverse_selected, "Alt+R")
+        self.a_detach = A("Detach &Audio", self.detach_audio, "Ctrl+Alt+D")
+        self.a_freeze = A("&Freeze Frame (3 s)", self.freeze_frame, "Ctrl+Alt+F")
         self.a_speed = {sp: A(f"{sp:g}×" + ("  (normal)" if sp == 1.0 else ""), lambda sp=sp: self._apply_speed(sp, live=False))
                         for sp in SPEED_PRESETS}
         self.a_keyframe = A("Add / Remove &Keyframe", self.add_keyframe_at_playhead, "Alt+K", "keyframe")
@@ -251,14 +257,14 @@ class MainWindow(QMainWindow):
       
         row.addSpacing(10)
 
-        clip_items = [self.a_split, self.a_delete, self.a_ripple, self.a_reverse, None,
+        clip_items = [self.a_split, self.a_delete, self.a_ripple, self.a_reverse, self.a_detach, self.a_freeze, None,
                       ("Speed", list(self.a_speed.values())), None,
                       self.a_keyframe, self.a_kf_prev, self.a_kf_next]
         canvas_items = [a for a, _, _ in self.a_aspects] + [None, self.a_bg_color, self.a_bg_blur, self.a_bg_pick]
         for title, items in (
                 ("File", [self.a_new, self.a_open, self.a_save, self.a_saveas, None, self.a_import, self.a_settings,
                           None, self.a_quit]),
-                ("Edit", [self.a_undo, self.a_redo]),
+                ("Edit", [self.a_undo, self.a_redo, None, self.a_copy, self.a_paste, self.a_dup]),
                 ("Insert", [self.a_title, self.a_lower, self.a_subtitle, None, self.a_record, None, self.a_layer,
                             self.a_atrack, self.a_prune]),
                 ("Clip", clip_items),
@@ -1007,6 +1013,102 @@ class MainWindow(QMainWindow):
             self.commit("Split Clip")
         else:
             self.statusBar().showMessage("Nothing to split at the playhead.", 3000)
+
+    # ── detach audio / freeze frame ──────────────────────────────────────────
+    def detach_audio(self):
+        """Put each selected video clip's sound on an audio track and mute the video."""
+        cv = self.timeline.canvas
+        ids = cv.selected_ids()
+        if not ids:
+            self.statusBar().showMessage("Select a video clip to detach its audio.", 3000)
+            return
+        done = [(i, self.project.detach_audio(i)) for i in ids]
+        done = [(i, a) for i, a in done if a is not None]
+        if not done:
+            self.statusBar().showMessage("Nothing to detach: pick an unlocked video clip that has sound and isn't "
+                                         "muted.", 4000)
+            return
+        self._request_waves([self.project.media[a.media_id] for _, a in done])
+        self.commit("Detach Audio")
+        cv.select_many({i for i, _ in done} | {a.id for _, a in done}, done[-1][1].id)    # video + its sound: move together
+        cv.ensure_track_visible(done[-1][1].track)
+        self.statusBar().showMessage(f"Detached audio from {len(done)} clip{'s' if len(done) > 1 else ''}.", 3000)
+
+    def _freeze_dir(self):
+        base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation) or tempfile.gettempdir()
+        return freeze_core.frames_dir(self.path, os.path.join(base, freeze_core.FOLDER_NAME))
+
+    def freeze_frame(self):
+        """Turn the frame under the playhead into a still clip (3 s) in front of everything else."""
+        t = self.engine.t
+        src = self.project.freeze_source(t, self.timeline.canvas.selected)
+        if src is None:
+            self.statusBar().showMessage("Put the playhead on a video clip to freeze its frame.", 4000)
+            return
+        m = self.project.media[src.media_id]
+        if not os.path.isfile(m.path):
+            self.statusBar().showMessage(f"{m.name} was not found on disk.", 4000)
+            return
+        folder = self._freeze_dir()
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            self.statusBar().showMessage(f"Can't save the frame in {folder}: {e}", 5000)
+            return
+        out = freeze_core.next_freeze_path(folder)
+        at = src.source_time(min(max(0.0, t - src.start), src.duration))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok = ft.extract_frame(m.path, at, out, m.fps)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not ok:
+            self.statusBar().showMessage("Couldn't read a frame at the playhead.", 4000)
+            return
+        new = self.project.add_freeze_frame(src.id, t, out)
+        pix = QPixmap(out)
+        if not pix.isNull():
+            self.thumbs[new.media_id] = pix.scaledToHeight(360, Qt.SmoothTransformation)
+        self.commit("Freeze Frame")
+        self.media_bin.populate(self.project, self.thumbs)
+        self.timeline.canvas.select(new.id)
+        self.timeline.canvas.ensure_track_visible(new.track)
+        self.statusBar().showMessage(f"Freeze frame added ({new.duration:g} s).", 3000)
+
+    # ── copy / paste / duplicate ─────────────────────────────────────────────
+    def copy_selected(self):
+        data = self.project.copy_clips(self.timeline.canvas.selected_ids())
+        if data is None:
+            self.statusBar().showMessage("Select a clip to copy.", 3000)
+            return False
+        self._clipboard = data
+        n = len(data["clips"])
+        self.statusBar().showMessage(f"Copied {n} clip{'s' if n > 1 else ''}. Ctrl+V pastes at the playhead.", 3000)
+        return True
+
+    def paste_clips(self):
+        if not getattr(self, "_clipboard", None):
+            self.statusBar().showMessage("Nothing to paste. Select clips and press Ctrl+C first.", 3000)
+            return
+        self._paste(self._clipboard, self.engine.t, "Paste Clips")
+
+    def duplicate_selected(self):
+        """Copy the selected clips and paste them right after the end of the selection."""
+        ids = self.timeline.canvas.selected_ids()
+        data = self.project.copy_clips(ids)
+        if data is None:
+            self.statusBar().showMessage("Select a clip to duplicate.", 3000)
+            return
+        self._paste(data, max(c.end for c in map(self.project.clip, ids)), "Duplicate Clips")
+
+    def _paste(self, data, t, label):
+        new = self.project.paste_clips(data, t)
+        if not new:
+            return
+        self.commit(label)
+        cv = self.timeline.canvas
+        cv.select_many({c.id for c in new}, new[-1].id)         # the pasted clips become the selection
+        cv.ensure_track_visible(new[0].track)
 
     def delete_selected(self, ripple):
         sid = self.timeline.canvas.selected

@@ -176,6 +176,27 @@ def thumbnail_png(path, kind, at=0.0, height=90):
     return r.stdout if r.returncode == 0 and r.stdout else None
 
 
+def extract_frame(path, at, out_path, fps=0.0):
+    """Save the full-size frame shown ``at`` seconds into a video as a PNG. True on success. A time at (or past)
+    the very end has no frame to decode, so it is retried a few frames earlier."""
+    exe = ffmpeg_path()
+    if not exe:
+        return False
+    step = 1.0 / fps if fps and fps > 0 else 0.04
+    for back in (0.0, step, 3 * step):
+        t = max(0.0, at - back)
+        cmd = [exe, "-v", "error", "-y", "-ss", f"{t:.3f}", "-i", path, "-frames:v", "1", out_path]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=60, **_NOWIN)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if r.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+            return True
+        if t <= 0.0:
+            break
+    return False
+
+
 # ── export ────────────────────────────────────────────────────────────────────
 QUALITY = {"High": 18, "Medium": 23, "Low": 28}
 FORMATS = {

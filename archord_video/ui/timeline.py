@@ -159,6 +159,9 @@ class TimelineCanvas(QWidget):
             self.statusMessage.emit(f"{len(ids)} clips selected")
         self.invalidate()
 
+    def select_many(self, ids, primary=None):
+        self._set_selection(ids, primary)
+
     def toggle_select(self, clip_id):
         """Ctrl/Shift-click: add the clip to the selection, or remove it if already selected."""
         ids = set(self.selection)
