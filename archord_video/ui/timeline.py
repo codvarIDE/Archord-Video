@@ -56,6 +56,7 @@ class TimelineCanvas(QWidget):
     playheadChanged = pyqtSignal(float)
     clipSelected = pyqtSignal(object)            # clip id or None
     clipMoved = pyqtSignal(str, int, float)      # id, track, start
+    clipsMoved = pyqtSignal(object, float)       # ids (several selected clips dragged together), time shift
     clipTrimmed = pyqtSignal(str, str, float)    # id, "left" | "right", new edge time
     clipRippled = pyqtSignal(str, str, float)    # id, "left" | "right", new edge time (later clips shift)
     clipSlipped = pyqtSignal(str, float)         # id, new in-point (clip position/length unchanged)
@@ -81,7 +82,9 @@ class TimelineCanvas(QWidget):
         self.scroll = 0.0           # seconds at the left edge of the track area
         self.vscroll = 0.0          # pixels scrolled down (any number of layers fit; the rest scroll)
         self.playhead = 0.0
-        self.selected = None
+        self.selected = None        # the primary clip (shown in the Properties panel)
+        self.selection = set()      # every selected clip id (always contains `selected` when that is set)
+        self._marquee = None        # (x0, y0, x1, y1, base ids) while box-selecting on empty space
         self.tool = "select"
         self.snap_on = True
         self._drag = None           # dict describing the active drag
@@ -121,9 +124,10 @@ class TimelineCanvas(QWidget):
     def set_project(self, project):
         self.project = project
         self.vscroll = max(0.0, min(self.vscroll, max(0.0, self.content_height() - self.view_height())))
+        self.selection = {i for i in self.selection if project.clip(i)}
         if self.selected and not project.clip(self.selected):
-            self.selected = None
-            self.clipSelected.emit(None)
+            self.selected = next(iter(sorted(self.selection)), None)
+            self.clipSelected.emit(self.selected)
         self.viewChanged.emit()
         self.invalidate()
 
@@ -131,8 +135,51 @@ class TimelineCanvas(QWidget):
         if clip_id != self.selected:
             self.sel_kf = None
         self.selected = clip_id
+        self.selection = {clip_id} if clip_id else set()
         self.clipSelected.emit(clip_id)
         self.invalidate()
+
+    def selected_ids(self):
+        """Selected clip ids in timeline order (the primary clip is always among them)."""
+        if not self.project:
+            return []
+        return [c.id for c in self.project.clips if c.id in self.selection]
+
+    def _set_selection(self, ids, primary=None):
+        ids = set(ids)
+        if primary not in ids:
+            primary = self.selected if self.selected in ids else (sorted(ids)[0] if ids else None)
+        changed = primary != self.selected
+        if changed:
+            self.sel_kf = None
+        self.selected, self.selection = primary, ids
+        if changed:
+            self.clipSelected.emit(primary)
+        if len(ids) > 1:
+            self.statusMessage.emit(f"{len(ids)} clips selected")
+        self.invalidate()
+
+    def toggle_select(self, clip_id):
+        """Ctrl/Shift-click: add the clip to the selection, or remove it if already selected."""
+        ids = set(self.selection)
+        if clip_id in ids:
+            ids.discard(clip_id)
+            self._set_selection(ids, self.selected if self.selected != clip_id else None)
+        else:
+            ids.add(clip_id)
+            self._set_selection(ids, clip_id)
+
+    def select_all(self):
+        if self.project:
+            self._set_selection({c.id for c in self.project.clips}, self.selected)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_A and e.modifiers() & Qt.ControlModifier:
+            self.select_all()
+        elif e.key() == Qt.Key_Escape and self.selection:
+            self.select(None)
+        else:
+            super().keyPressEvent(e)
 
     # ── coordinate helpers ───────────────────────────────────────────────────
     def t2x(self, t):
@@ -456,14 +503,28 @@ class TimelineCanvas(QWidget):
                 t = self.snap(self.x2t(pos.x()), ignore=c.id)
                 self.splitRequested.emit(c.id, t)
             return
+        multi = bool(e.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)) and self.tool == "select"
         if c is None:
-            if self.selected:
+            if multi and pos.x() >= HEADER_W and pos.y() >= RULER_H:      # Ctrl/Shift + drag on empty space: box select
+                self._marquee = (pos.x(), pos.y(), pos.x(), pos.y(), set(self.selection))
+                return
+            if self.selection:
                 self.select(None)
             if pos.x() >= HEADER_W:
                 self._scrub = True
                 self._seek_to_x(pos.x())
             return
-        if self.selected != c.id:
+        if multi:
+            self.toggle_select(c.id)
+            return
+        group = self.tool == "select" and zone == "body" and c.id in self.selection and len(self.selection) > 1
+        if group:                                              # press inside a multi-selection: keep it, make this the primary
+            if self.selected != c.id:
+                self.sel_kf = None
+                self.selected = c.id
+                self.clipSelected.emit(c.id)
+                self.invalidate()
+        elif self.selected != c.id or self.selection != {c.id}:
             self.select(c.id)
         if self.project.track_locked(c.track):                 # selectable, but nothing can change
             self._locked_note(c.track)
@@ -480,6 +541,9 @@ class TimelineCanvas(QWidget):
                           track0=c.track, start=c.start, dur=c.duration, track=c.track, moved=False,
                           press=pos, ripple=ripple, in0=c.in_point, t0=self.x2t(pos.x()), shift=0.0)
         self._drag["in"] = c.in_point               # live in-point while slipping
+        if group:
+            ids = [i for i in self.selected_ids() if not self.project.clip_locked(i)]
+            self._drag.update(group=ids, delta=0.0, lim=self.project.group_move_limits(ids))
 
     def _locked_note(self, track):
         self.statusMessage.emit(f"{self.project.tracks[track]['name']} is locked. Click its lock to edit.")
@@ -505,6 +569,13 @@ class TimelineCanvas(QWidget):
             return
         if self._scrub:
             self._seek_to_x(pos.x())
+            return
+        if self._marquee is not None:                          # box select: everything the box touches
+            x0, y0, _, _, base = self._marquee
+            self._marquee = (x0, y0, pos.x(), pos.y(), base)
+            box = QRectF(QPointF(x0, y0), QPointF(pos.x(), pos.y())).normalized()
+            hit = {c.id for c in self.project.clips if box.intersects(self.clip_rect(c))}
+            self._set_selection(base | hit)
             return
         kd = self._kfdrag
         if kd is not None:                                     # dragging a keyframe diamond along its clip
@@ -564,6 +635,11 @@ class TimelineCanvas(QWidget):
             else:
                 d["dur"], d["shift"] = edge - c.start, edge - c.end
             d["start"] = c.start
+        elif d["zone"] == "body" and d.get("group"):             # several clips: one shared time shift, layers unchanged
+            raw = self.snap(t - d["grab"], ignore=set(d["group"]), also=(c.duration,)) - d["start0"]
+            lo, hi = d["lim"]
+            d["delta"] = min(max(raw, lo), hi)
+            d["start"], d["track"], d["dur"] = d["start0"] + d["delta"], d["track0"], c.duration
         elif d["zone"] == "body":
             self._autoscroll(pos.y())
             start = self.snap(t - d["grab"], ignore=c.id, also=(c.duration,))
@@ -607,6 +683,10 @@ class TimelineCanvas(QWidget):
         if self._scrub:
             self._scrub = False
             return
+        if self._marquee is not None:
+            self._marquee = None
+            self.invalidate()
+            return
         kd, self._kfdrag = self._kfdrag, None
         if kd is not None:
             self.set_tool(self.tool)
@@ -626,6 +706,9 @@ class TimelineCanvas(QWidget):
             if abs(d["shift"]) > 1e-6:
                 edge = d["start0"] + (d["dur0"] - d["dur"]) if d["zone"] == "left" else d["start0"] + d["dur"]
                 self.clipRippled.emit(d["id"], d["zone"], edge)
+        elif d["zone"] == "body" and d.get("group"):
+            if abs(d["delta"]) > 1e-6:
+                self.clipsMoved.emit(list(d["group"]), d["delta"])
         elif d["zone"] == "body":
             if abs(d["start"] - d["start0"]) > 1e-6 or d["track"] != d["track0"]:
                 self.clipMoved.emit(d["id"], d["track"], d["start"])
@@ -749,7 +832,19 @@ class TimelineCanvas(QWidget):
         p.drawPixmap(0, 0, self._cache)
         p.setRenderHint(QPainter.Antialiasing)
         self._paint_recording(p)
+        self._paint_marquee(p)
         self._paint_playhead(p)
+
+    def _paint_marquee(self, p):
+        if self._marquee is None:
+            return
+        x0, y0, x1, y1, _ = self._marquee
+        box = QRectF(QPointF(x0, y0), QPointF(x1, y1)).normalized()
+        col = QColor(theme.T["accent"]) if "accent" in theme.T else QColor("#7c5cff")
+        p.setPen(QPen(col, 1))
+        fill = QColor(col); fill.setAlpha(40)
+        p.setBrush(fill)
+        p.drawRect(box)
 
     def _paint_recording(self, p):
         r = self.rec
@@ -1022,19 +1117,23 @@ class TimelineCanvas(QWidget):
     def _draw_clip(self, p, c):
         T = theme.T
         d = self._drag if (self._drag and self._drag["id"] == c.id and self._drag["moved"]) else None
+        g = self._drag if (self._drag and self._drag["moved"] and self._drag.get("group") and c.id in self._drag["group"]
+                           and not d) else None
         m = self.project.media.get(c.media_id)
         if m is None:
             return
         shift = self._ripple_shift(c)
         if d:
             r = self.clip_rect(c, d["start"], d["dur"], d["track"])
+        elif g:                                            # a companion of the clip being dragged: same shift
+            r = self.clip_rect(c, c.start + g["delta"])
         else:
             r = self.clip_rect(c, c.start + shift if shift else None)
         in_point = d["in"] if d and d["zone"] == "slip" else c.in_point
         if r.right() < HEADER_W or r.left() > self.width():
             return
         col = QColor(KIND_COLORS.get(m.kind, "#888"))
-        body = QColor(col); body.setAlpha(235 if c.id == self.selected else 200)
+        body = QColor(col); body.setAlpha(235 if c.id in self.selection else 200)
         path = QPainterPath()
         path.addRoundedRect(r, 6, 6)
         p.setPen(Qt.NoPen)
@@ -1134,7 +1233,7 @@ class TimelineCanvas(QWidget):
                 x += 9
         p.restore()
 
-        sel = c.id == self.selected
+        sel = c.id in self.selection
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(QColor("white") if sel else QColor(0, 0, 0, 60), 2 if sel else 1))
         p.drawPath(path)

@@ -524,6 +524,7 @@ class MainWindow(QMainWindow):
         c.playheadChanged.connect(self.engine.seek)
         c.clipSelected.connect(self._on_selected)
         c.clipMoved.connect(self._on_clip_moved)
+        c.clipsMoved.connect(self._on_clips_moved)
         c.clipTrimmed.connect(self._on_clip_trimmed)
         c.clipRippled.connect(self._on_clip_rippled)
         c.clipSlipped.connect(self._on_clip_slipped)
@@ -784,6 +785,10 @@ class MainWindow(QMainWindow):
         self.project.move(cid, track, start)
         self.commit("Move Clip")
 
+    def _on_clips_moved(self, ids, delta):
+        if self.project.move_many(ids, delta):
+            self.commit("Move Clips")
+
     def _on_clip_trimmed(self, cid, side, edge):
         if self._refuse_locked(cid):
             return
@@ -995,8 +1000,8 @@ class MainWindow(QMainWindow):
 
     def split_at_playhead(self):
         t = self.engine.t
-        sel = self.project.clip(self.timeline.canvas.selected) if self.timeline.canvas.selected else None
-        targets = [sel] if sel and sel.start < t < sel.end else [c for c in self.project.clips if c.start < t < c.end]
+        sel = [c for c in map(self.project.clip, self.timeline.canvas.selected_ids()) if c and c.start < t < c.end]
+        targets = sel if sel else [c for c in self.project.clips if c.start < t < c.end]
         n = sum(1 for c in targets if self.project.split(c.id, t))
         if n:
             self.commit("Split Clip")
@@ -1009,11 +1014,19 @@ class MainWindow(QMainWindow):
         if sid and kf is not None and kf[0] == sid and not ripple:      # a selected keyframe diamond goes first
             self._on_keyframe_delete(sid, kf[1])
             return
-        if not sid or self._refuse_locked(sid):
+        ids = self.timeline.canvas.selected_ids()
+        if not ids:
+            return
+        if len(ids) == 1 and self._refuse_locked(ids[0]):
+            return
+        free = [i for i in ids if not self.project.clip_locked(i)]
+        if not free:
+            self.statusBar().showMessage("The selected clips are on locked layers. Click the lock to edit.", 4000)
             return
         self.timeline.canvas.select(None)
-        self.project.delete([sid], ripple=ripple)
-        self.commit("Ripple Delete" if ripple else "Delete Clip")
+        self.project.delete(free, ripple=ripple)
+        many = "s" if len(free) > 1 else ""
+        self.commit(f"Ripple Delete{'' if not many else ' Clips'}" if ripple else f"Delete Clip{many}")
 
     def _on_property(self, attr, value):
         sid = self.timeline.canvas.selected

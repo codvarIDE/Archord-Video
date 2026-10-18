@@ -1317,6 +1317,37 @@ class Project:
         c.track = track
         c.start = self.resolve_start(track, start, c.duration, ignore=clip_id)
 
+    def group_move_limits(self, clip_ids):
+        """(lo, hi) range of the time shift that moves all of ``clip_ids`` together without leaving 0 or
+        overlapping a clip that isn't part of the move. Clips on locked layers don't move (and so are obstacles)."""
+        mv = [self.clip(i) for i in clip_ids]
+        mv = [c for c in mv if c is not None and not self.track_locked(c.track)]
+        if not mv:
+            return 0.0, 0.0
+        ids = {c.id for c in mv}
+        lo, hi = -min(c.start for c in mv), float("inf")
+        for c in mv:
+            for o in self.track_clips(c.track):
+                if o.id in ids:
+                    continue
+                if o.start >= c.end - 1e-9:
+                    hi = min(hi, o.start - c.end)
+                elif o.end <= c.start + 1e-9:
+                    lo = max(lo, o.end - c.start)
+        return lo, max(lo, hi)
+
+    def move_many(self, clip_ids, delta):
+        """Shift several clips by the same ``delta`` seconds (each stays on its own layer). True if anything moved."""
+        lo, hi = self.group_move_limits(clip_ids)
+        delta = min(max(delta, lo), hi)
+        if abs(delta) < 1e-9:
+            return False
+        for i in clip_ids:
+            c = self.clip(i)
+            if c is not None and not self.track_locked(c.track):
+                c.start = max(0.0, c.start + delta)
+        return True
+
     def delete(self, clip_ids, ripple=False):
         ids = {i for i in clip_ids if not self.clip_locked(i)}      # locked layers keep their clips
         removed = [c for c in self.clips if c.id in ids]

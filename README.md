@@ -35,6 +35,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 - **Animations, CapCut style**: select a clip (video, photo or title) and open **Animation** in the Properties panel. Pick an **In** animation (Fade, Zoom In/Out, Pop, Slide ×4, Rise, Fall, Spin, Swing, Wipe ×5), an **Out** animation, or a looping **Combo** (Pulse, Heartbeat, Swing, Float, Bounce, Shake, Spin, Slow Zoom, Pan). The duration slider sets how long an In / Out lasts, a short preview plays as soon as you pick one, and the exact same motion is rendered on export. Animations stack on top of your own position / scale / keyframes. Clips show small ramps on the timeline where an In / Out runs.
 - **Unlimited files**: import any number of files at once (one undo step per batch); select several in the media bin (`Ctrl`/`Shift`-click) and drag or add them together.
 - **Timeline**: ruler, playhead scrubbing, snapping, zoom, scroll.
+- **Multi-select**: Ctrl/Shift-click or box-select several clips, then drag them together (each keeps its layer and the gaps between them), split or delete them in one step. The last clip you click is the primary one shown in Properties.
 - **Editing**: move (also between tracks), trim by dragging clip edges, **Ripple Edit tool** (trim an edge and later clips on the track follow, so no gap is left), **Slip tool** (change which part of the source plays without moving or resizing the clip), split (`S` / `Ctrl+K` / Razor tool), delete, ripple delete, undo/redo (100 steps).
 - **Text & titles**: add a Title, Lower third or Subtitle at the playhead (`Insert` menu, the **Text** toolbar button, or `Ctrl+T`). Titles are ordinary clips on the top video track, so they move, trim, split, ripple and undo like everything else. Edit the text, font, size, bold/italic, alignment, colour, outline, background box, opacity and X/Y position in the Properties panel; they show live in the preview.
 - **Voiceover**: record from the microphone straight onto an audio track (`Ctrl+R`, the **Record** button in the timeline toolbar, or `Insert > Record Voiceover`). Pick the microphone, optionally count in 3-2-1, and the project plays (muted by default, so the speakers don't leak into the take) while you talk; a red take with a live level trace grows on the audio track from the playhead. **Stop** adds it as a normal clip (move, trim, split, volume, undo all work; one undo step removes the whole take). It goes on the first free audio track, or a new one if that would overlap something. Takes are saved as `Voiceover N.wav` in a `Voiceovers` folder next to your saved project (or the app's data folder until the project is saved). No FFmpeg or codec packs needed, and nothing is recorded until you press Record.
@@ -59,7 +60,10 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 | `Home` / `End` | Go to start / end |
 | `Alt+R` | Reverse the selected clip |
 | `S` or `Ctrl+K` | Split at playhead (selected clip, else every clip under the playhead) |
-| `Delete` / `Shift+Delete` | Delete / ripple delete |
+| `Delete` / `Shift+Delete` | Delete / ripple delete (all selected clips) |
+| `Ctrl`/`Shift` + click | Add or remove a clip from the selection |
+| `Ctrl`/`Shift` + drag on empty space | Box-select clips |
+| `Ctrl+A` / `Esc` | Select all clips / clear the selection |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | `=` / `-` / `\` | Timeline zoom in / out / fit |
 | `Ctrl+wheel` | Zoom timeline at the cursor (plain wheel scrolls) |
