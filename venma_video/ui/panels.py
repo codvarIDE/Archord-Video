@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QListWidget, QListWidgetItem,
     QAbstractItemView, QComboBox, QSpinBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
     QFileDialog, QFrame, QGridLayout, QPlainTextEdit, QFontComboBox, QToolButton, QCheckBox,
-    QColorDialog, QScrollArea, QMenu, QSizePolicy, QDoubleSpinBox,
+    QColorDialog, QScrollArea, QMenu, QSizePolicy, QDoubleSpinBox, QStackedWidget, QButtonGroup,
 )
 
 from . import theme
@@ -354,15 +354,12 @@ class PropertiesPanel(QWidget):
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        inner = QWidget()
-        scroll.setWidget(inner)
-        outer.addWidget(scroll)
-        lay = QVBoxLayout(inner)
-        lay.setContentsMargins(14, 10, 14, 12)
-        lay.setSpacing(8)
+        outer.setSpacing(0)
+        # Sections are built into this hidden staging layout, then _make_tabs() moves each one into its own tab page.
+        stage = QWidget()
+        lay = QVBoxLayout(stage)
+        self._stage = stage
+        self._was_title = False
         self._loading = False
         self._t_clip = 0.0          # current clip-local time (set by main window)
         self.title = QLabel("No clip selected")
@@ -371,8 +368,17 @@ class PropertiesPanel(QWidget):
         self.info = QLabel("")
         self.info.setStyleSheet(f"color: {theme.T['muted']}; font-size: 9pt;")
         self.info.setWordWrap(True)
-        lay.addWidget(self.title)
-        lay.addWidget(self.info)
+        head = QWidget()
+        hl = QVBoxLayout(head)
+        hl.setContentsMargins(14, 10, 14, 6)
+        hl.setSpacing(4)
+        hl.addWidget(self.title)
+        hl.addWidget(self.info)
+        outer.addWidget(head)
+        self._body_host = QHBoxLayout()
+        self._body_host.setContentsMargins(0, 0, 0, 0)
+        self._body_host.setSpacing(0)
+        outer.addLayout(self._body_host, 1)
         self._build_text_section(lay)
         self._build_speed_section(lay)
         self.rows = {}
@@ -447,9 +453,105 @@ class PropertiesPanel(QWidget):
         kflay.addWidget(self.kf_list)
         lay.addWidget(self.sec_kf)
 
-        lay.addStretch(1)
+        self._make_tabs()
         self._current_clip = None
         self.set_clip(None, None, 30)
+
+    # (key, icon name, tooltip, section attributes, extra widget attributes)
+    TABS = [
+        ("text",   "text",       "Text",       ("text_box",),                  ()),
+        ("adjust", "sliders",    "Adjust",     ("sec_xform", "sec_visual"),    ("b_reset",)),
+        ("audio",  "volume",     "Audio",      ("sec_audio",),                 ()),
+        ("speed",  "tab_speed",  "Speed",      ("sec_speed",),                 ()),
+        ("anim",   "tab_anim",   "Animation",  ("sec_anim",),                  ()),
+        ("trans",  "tab_trans",  "Transition", ("sec_trans",),                 ()),
+        ("kf",     "keyframe",   "Keyframes",  ("sec_kf",),                    ()),
+    ]
+
+    def _make_tabs(self):
+        """Illustrator-style: a slim icon rail on the right picks one short page at a time, so nothing needs a long scroll."""
+        self._stack = QStackedWidget()
+        rail = QFrame()
+        rail.setObjectName("rail")
+        rail.setFixedWidth(42)
+        rl = QVBoxLayout(rail)
+        rl.setContentsMargins(0, 6, 0, 6)
+        rl.setSpacing(2)
+        self._rail_group = QButtonGroup(self)
+        self._rail_group.setExclusive(True)
+        self._tabs = []                       # (key, button, [section widgets])
+        for i, (key, icon_name, tip, sec_names, extra_names) in enumerate(self.TABS):
+            secs = [getattr(self, n) for n in sec_names]
+            page_scroll = QScrollArea()
+            page_scroll.setWidgetResizable(True)
+            page_scroll.setFrameShape(QFrame.NoFrame)
+            page = QWidget()
+            page_scroll.setWidget(page)
+            pl = QVBoxLayout(page)
+            pl.setContentsMargins(14, 4, 14, 12)
+            pl.setSpacing(8)
+            heading = QLabel(tip)
+            heading.setObjectName("tabTitle")
+            pl.addWidget(heading)
+            for sec in secs:
+                pl.addWidget(sec)
+                if len(secs) == 1:            # a lone section needs no fold-away header: the tab title says it
+                    sec.head.setVisible(False)
+                    sec.body.setVisible(True)
+            for n in extra_names:
+                pl.addWidget(getattr(self, n))
+            pl.addStretch(1)
+            self._stack.addWidget(page_scroll)
+            btn = QToolButton()
+            btn.setObjectName("railTab")
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setIconSize(QSize(18, 18))
+            btn.setFixedSize(42, 38)
+            theme.set_icon(btn, icon_name, 18)
+            btn.clicked.connect(lambda _=False, idx=i: self._stack.setCurrentIndex(idx))
+            self._rail_group.addButton(btn)
+            rl.addWidget(btn)
+            self._tabs.append((key, btn, secs))
+        rl.addStretch(1)
+        self._rail = rail
+        self._empty = QLabel("Select a clip on the timeline\nto edit it here.")
+        self._empty.setObjectName("emptyHint")
+        self._empty.setAlignment(Qt.AlignCenter)
+        self._empty.setWordWrap(True)
+        self._empty_index = self._stack.addWidget(self._empty)
+        self._body_host.addWidget(self._stack, 1)
+        self._body_host.addWidget(rail)
+        self._stage.deleteLater()
+        self._tabs[1][1].setChecked(True)
+        self._stack.setCurrentIndex(1)
+
+    def _sync_tabs(self, prefer=None):
+        """Show a rail button only when its page has something to show; keep the open tab, else fall back to the first."""
+        if self._current_clip is None:                    # nothing selected: a hint instead of a wall of disabled sliders
+            self._rail.setVisible(False)
+            self._stack.setCurrentIndex(self._empty_index)
+            return
+        self._rail.setVisible(True)
+        visible = []
+        for i, (key, btn, secs) in enumerate(self._tabs):
+            on = any(not s.isHidden() for s in secs)
+            btn.setVisible(on)
+            if on:
+                visible.append(i)
+        cur = self._stack.currentIndex()
+        if cur == self._empty_index:
+            cur = 1                                        # coming from the empty hint: open Adjust
+        target = cur
+        if prefer is not None:
+            for i, (key, _b, _s) in enumerate(self._tabs):
+                if key == prefer and i in visible:
+                    target = i
+        if target not in visible and visible:
+            target = visible[0]
+        self._tabs[target][1].setChecked(True)
+        self._stack.setCurrentIndex(target)
 
     def _toggle_property_kf(self, attr):
         """The diamond next to a slider works like CapCut's: a keyframe under the playhead is removed, otherwise one is added."""
@@ -475,6 +577,8 @@ class PropertiesPanel(QWidget):
             sec.retint()
         theme.set_icon(self.b_reset, "reset", 13)
         theme.set_icon(self.b_kf_add, "keyframe", 13)
+        for (key, btn, _s), spec in zip(self._tabs, self.TABS):
+            theme.set_icon(btn, spec[1], 18)
         self._sync_kf_slider_icons()
 
     def _sync_kf_slider_icons(self):
@@ -901,6 +1005,8 @@ class PropertiesPanel(QWidget):
         kf_on = on and not is_title and media is not None and media.kind in ("video", "image")
         self.sec_kf.setVisible(kf_on)
         self.sec_anim.setVisible(on and (is_title or (media is not None and media.kind in ("video", "image"))))
+        self._sync_tabs("text" if is_title and not self._was_title else None)   # a title opens on Text
+        self._was_title = is_title
         self._load_animation(clip)
         for attr, (r, scale) in self.rows.items():
             r.setEnabled(on)
@@ -917,7 +1023,7 @@ class PropertiesPanel(QWidget):
             self.refresh_fades(clip)
         if not on:
             self.title.setText("No clip selected")
-            self.info.setText("Click a clip in the timeline to edit its properties.")
+            self.info.setText("")
             self.kf_list.clear()
             self._sync_kf_slider_icons()
             return

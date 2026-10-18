@@ -10,6 +10,7 @@ import json
 import os
 
 from . import animation
+from .fileio import atomic_write_text
 
 MIN_CLIP = 0.1
 IMAGE_DEFAULT_DURATION = 5.0
@@ -1360,8 +1361,8 @@ class Project:
         return Project.from_dict(json.loads(s))
 
     def save(self, path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=1)
+        # serialise first, then swap the file in one step: a crash or full disk mid-save can't corrupt the old file
+        atomic_write_text(path, json.dumps(self.to_dict(), indent=1))
 
     @staticmethod
     def load(path):

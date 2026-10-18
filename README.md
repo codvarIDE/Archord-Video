@@ -47,7 +47,8 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 - **Social presets**: in the Export dialog pick **TikTok / Reels / Shorts 9:16** (1080 × 1920), **Square 1:1** (1080 × 1080), **YouTube 16:9** (1920 × 1080) or **4K UHD** (3840 × 2160), or keep the project's own size. A preset with a different shape is a temporary canvas switch: pictures are fitted inside the new frame, with the canvas background around them.
 - **Canvas aspect switch & background**: `Menu > Canvas` switches the project between 16:9, 9:16, 1:1 and 4:5 (the short side is kept), and sets what shows around a picture that doesn't fill the frame: a **color fill** (pick any color) or a **blurred copy of the picture**. The same settings are in Project Settings, and are saved with the project. The preview shows exactly what is exported. Blur applies to untouched pictures on the bottom picture layer; a picture you move or resize shows the color fill instead.
 - **GPU encoding**: the Export dialog uses a hardware H.264 encoder for MP4 when one really works on your machine (NVIDIA NVENC, Intel Quick Sync, AMD AMF or Apple VideoToolbox are tested with a short trial encode). If the GPU encoder fails mid-export, Venma retries on the CPU automatically. WebM always uses the CPU.
-- **Projects**: save/open `.vvproj` (JSON, references your media files by path).
+- **Projects**: save/open `.vvproj` (JSON, references your media files by path). Saving is crash-safe: the old file is only replaced once the new one is fully written.
+- **Autosave & crash recovery**: unsaved work is snapshotted every 15 seconds while you edit. If Venma Video crashes, is killed or the computer loses power, the next start offers to **Recover** it (or Discard / Ask me later). Nothing is left behind after a normal exit or a Save. Snapshots live in the app data folder, not next to your project.
 
 ## Shortcuts
 | Key | Action |
@@ -70,6 +71,7 @@ Optional: `pip install qtawesome` for a few extra legacy icons.
 | `Ctrl+Shift+D` | Dark / light theme |
 
 ## Known limits of v0.1
+- Autosave keeps the **project** (the timeline, titles, settings), not your media files. If a source file was moved or deleted, recovery opens the project with the usual "Missing media" notice. Voiceover takes of an unsaved project are in the app data folder and survive.
 - While paused or scrubbing, the preview stacks all visible layers (opacity and colour included); during playback it plays the topmost clip's own video and the first audio-track clip. Opacity, colour
   correction, volume boost above 100 % and mixing several audio tracks show up in the **export** only.
 - The preview plays one audio track at a time (the first audio track that has a clip at that moment). A voiceover that had
@@ -92,6 +94,8 @@ venma_video/
 ├── core/             # no Qt UI code — easy to test
 │   ├── project.py        # timeline model (media, clips, tracks), edits, JSON snapshots for undo
 │   ├── voiceover.py      # WAV writer, level meter maths and take naming for voiceover recording
+│   ├── autosave.py       # autosave snapshots + crash detection/recovery (no Qt)
+│   ├── fileio.py         # atomic_write_text: crash-safe file writes
 │   ├── waveform.py       # decodes a file's sound to compact peaks the timeline draws at any zoom
 │   └── ffmpeg_tools.py   # locate/probe/thumbnail + the filter_complex export builder
 ├── ui/

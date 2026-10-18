@@ -458,10 +458,10 @@ def _place(src, dst, W, H, clip, fps, tag, bg="black@0", animate=False):
         px_expr = kx if kx is not None else _num(W * clip.pos_x)
         py_expr = ky if ky is not None else _num(H * clip.pos_y)
         return [f"color=c={bg}:s={W}x{H}:r={fps},format=rgba[bg{tag}]",
-                f"[bg{tag}][{src}]overlay=x='({px_expr}){off_x}-w/2':y='({py_expr}){off_y}-h/2':format=auto:shortest=1[{dst}]"]
+                f"[bg{tag}][{src}]overlay=x='({px_expr}){off_x}-w/2':y='({py_expr}){off_y}-h/2':format=rgb:shortest=1[{dst}]"]
     px, py = _num(W * clip.pos_x), _num(H * clip.pos_y)
     return [f"color=c={bg}:s={W}x{H}:r={fps},format=rgba[bg{tag}]",
-            f"[bg{tag}][{src}]overlay=x='{px}{off_x}-w/2':y='{py}{off_y}-h/2':format=auto:shortest=1[{dst}]"]
+            f"[bg{tag}][{src}]overlay=x='{px}{off_x}-w/2':y='{py}{off_y}-h/2':format=rgb:shortest=1[{dst}]"]
 
 
 def _wipe_condition(kind, W, H, p):

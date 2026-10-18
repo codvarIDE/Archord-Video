@@ -33,6 +33,7 @@ def main(argv=None):
     win = MainWindow()
     win.setWindowIcon(icon)
     win.show()
+    win.offer_recovery()
     if len(argv) > 1:
         win.import_files(argv[1:])
     sys.exit(app.exec_())

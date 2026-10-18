@@ -1,13 +1,14 @@
 """Venma Video main window, CapCut-style: one slim top bar, a Media/Text panel, the player and a Details
-panel across the top, and the timeline (with its own toolbar) underneath. Fixed layout, no docking."""
+panel across the top, and the timeline (with its own toolbar) underneath. Panels can be hidden from the View menu; no docking."""
 import os
 import shutil
 import tempfile
+from datetime import datetime
 
 from PyQt5.QtCore import Qt, QSize, QTimer, QSettings, QStandardPaths
 from PyQt5.QtGui import QKeySequence, QPixmap, QColor
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAction, QActionGroup,
+    QMainWindow, QScrollArea, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAction, QActionGroup,
     QSplitter, QFileDialog, QMessageBox, QProgressDialog, QSizePolicy, QStackedWidget, QButtonGroup,
     QApplication, QToolButton, QMenu, QFrame, QDialog, QColorDialog,
 )
@@ -17,6 +18,7 @@ from ..core import ffmpeg_tools as ft
 from ..core import animation as anim_core
 from ..core.project import TRANSITIONS
 from ..core import voiceover as vo_core
+from ..core import autosave as autosave_core
 from ..core.project import ASPECTS, Project, MediaItem, CLIP_DEFAULTS, TITLE_PRESETS, KEYFRAMED_PROPS, SPEED_PRESETS, MIN_CLIP
 from .timeline import TimelineWidget, format_tc
 from .preview import PreviewView, PreviewEngine, HAS_MULTIMEDIA
@@ -28,6 +30,7 @@ from ..workers import MediaWorker, ExportWorker, WaveformWorker
 
 MAX_HISTORY = 100
 PROJECT_EXT = ".vvproj"
+AUTOSAVE_MS = 15000               # how often unsaved work is snapshotted (only when something changed)
 LAYOUT_KEY = "layout2"          # splitter sizes; new key so layouts saved by older versions are ignored
 
 
@@ -39,6 +42,10 @@ class MainWindow(QMainWindow):
         self.project = Project(typed=True)
         self.path = None
         self.dirty = False
+        self._autosaver = autosave_core.Autosaver(self._autosave_dir())
+        self._autosaver.start()
+        self._autosave_warned = False
+        self._recovered_entry = None     # crash snapshot we recovered from, kept until this session's own snapshot is safe
         self.thumbs = {}                 # media id -> QPixmap
         self.waves = {}                  # media path -> core.waveform.Waveform (None: no sound to draw)
         self._wave_queue = []            # paths still to decode, one at a time
@@ -74,6 +81,9 @@ class MainWindow(QMainWindow):
         self._env_timer = QTimer(self, singleShot=True, interval=300)   # parented: dies with the window instead of firing late
         self._env_timer.timeout.connect(self._check_environment)
         self._env_timer.start()
+        self._autosave_timer = QTimer(self, interval=AUTOSAVE_MS)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        self._autosave_timer.start()
 
     # ── actions ──────────────────────────────────────────────────────────────
     def _act(self, text, slot, shortcut=None, icon=None, checkable=False):
@@ -132,6 +142,13 @@ class MainWindow(QMainWindow):
         self.a_snap = A("Snapping", self._toggle_snap, "N", "magnet", checkable=True)
         self.a_snap.setChecked(True)
         self.a_theme = A("Toggle Dark / Light", self.toggle_theme, "Ctrl+Shift+D", "sun" if theme.NAME == "dark" else "moon")
+        self.a_view_left = A("Media Panel", self._apply_panels, "Ctrl+1", "panel_media", checkable=True)
+        self.a_view_right = A("Details Panel", self._apply_panels, "Ctrl+2", "panel_props", checkable=True)
+        self.a_view_left.setChecked(True)
+        self.a_view_right.setChecked(True)
+        self.a_focus = A("Focus on Preview (hide side panels)", self._toggle_focus, "Ctrl+Shift+F", None)
+        self.a_reset_layout = A("Reset Layout", self.reset_layout)
+        self.a_shortcuts = A("Keyboard Shortcuts", self.show_shortcuts, "F1", "keyboard")
         # editing tools (exclusive): shown as a segmented group in the timeline toolbar
         self.tool_group = QActionGroup(self)
         self.tool_actions = {}
@@ -167,9 +184,11 @@ class MainWindow(QMainWindow):
 
         self.hsplit = QSplitter(Qt.Horizontal)
         self.hsplit.setChildrenCollapsible(False)
-        self.hsplit.addWidget(self._build_left_panel())
+        self.left_frame = self._build_left_panel()
+        self.details_frame = self._build_details_panel()
+        self.hsplit.addWidget(self.left_frame)
         self.hsplit.addWidget(self._build_player_panel())
-        self.hsplit.addWidget(self._build_details_panel())
+        self.hsplit.addWidget(self.details_frame)
         self.hsplit.setStretchFactor(0, 0)
         self.hsplit.setStretchFactor(1, 1)
         self.hsplit.setStretchFactor(2, 0)
@@ -232,34 +251,21 @@ class MainWindow(QMainWindow):
         row.addWidget(brand)
         row.addSpacing(10)
 
-        self.b_menu = QToolButton()                       # File / Edit / Insert live here (no menu bar)
-        self.b_menu.setObjectName("menuBtn")
-        self.b_menu.setText("Menu")
-        self.b_menu.setPopupMode(QToolButton.InstantPopup)
-        self.b_menu.setCursor(Qt.PointingHandCursor)
-        menu = QMenu(self.b_menu)
+        clip_items = [self.a_split, self.a_delete, self.a_ripple, self.a_reverse, None,
+                      ("Speed", list(self.a_speed.values())), None,
+                      self.a_keyframe, self.a_kf_prev, self.a_kf_next]
+        canvas_items = [a for a, _, _ in self.a_aspects] + [None, self.a_bg_color, self.a_bg_blur, self.a_bg_pick]
         for title, items in (
-                ("File", (self.a_new, self.a_open, self.a_save, self.a_saveas, None, self.a_import, self.a_settings,
-                          None, self.a_quit)),
-                ("Edit", (self.a_undo, self.a_redo, None, self.a_split, self.a_delete, self.a_ripple, None, self.a_keyframe, self.a_kf_prev, self.a_kf_next)),
-                ("Insert", (self.a_title, self.a_lower, self.a_subtitle, None, self.a_record, None, self.a_layer,
-                            self.a_atrack, self.a_prune))):
-            sub = menu.addMenu(title)
-            for a in items:
-                sub.addSeparator() if a is None else sub.addAction(a)
-        canvas_menu = menu.addMenu("Canvas")
-        for a, _, _ in self.a_aspects:
-            canvas_menu.addAction(a)
-        canvas_menu.addSeparator()
-        for a in (self.a_bg_color, self.a_bg_blur, self.a_bg_pick):
-            canvas_menu.addAction(a)
-        clip_menu = menu.addMenu("Clip")
-        clip_menu.addAction(self.a_reverse)
-        speed_menu = clip_menu.addMenu("Speed")
-        for a in self.a_speed.values():
-            speed_menu.addAction(a)
-        self.b_menu.setMenu(menu)
-        row.addWidget(self.b_menu)
+                ("File", [self.a_new, self.a_open, self.a_save, self.a_saveas, None, self.a_import, self.a_settings,
+                          None, self.a_quit]),
+                ("Edit", [self.a_undo, self.a_redo]),
+                ("Insert", [self.a_title, self.a_lower, self.a_subtitle, None, self.a_record, None, self.a_layer,
+                            self.a_atrack, self.a_prune]),
+                ("Clip", clip_items),
+                ("Canvas", canvas_items),
+                ("View", [self.a_view_left, self.a_view_right, self.a_focus, self.a_reset_layout, None,
+                          self.a_theme, None, self.a_shortcuts])):
+            row.addWidget(self._menu_button(title, items))
 
         row.addStretch(1)
         self.project_label = QLabel("Untitled")
@@ -267,6 +273,8 @@ class MainWindow(QMainWindow):
         row.addWidget(self.project_label)
         row.addStretch(1)
 
+        row.addWidget(self._icon_button(self.a_view_left, "tlBtn", 18))
+        row.addWidget(self._icon_button(self.a_view_right, "tlBtn", 18))
         self.b_theme = self._icon_button(self.a_theme, "tlBtn", 18)
         row.addWidget(self.b_theme)
         self.b_export = QPushButton(" Export")
@@ -277,6 +285,78 @@ class MainWindow(QMainWindow):
         self.b_export.clicked.connect(self.export_video)
         row.addWidget(self.b_export)
         return bar
+
+    def _menu_button(self, title, items):
+        """A top-bar button that opens one menu. ``items`` holds actions, None (separator) or (title, [items]) submenus."""
+        b = QToolButton()
+        b.setObjectName("menuBtn")
+        b.setText(title)
+        b.setPopupMode(QToolButton.InstantPopup)
+        b.setCursor(Qt.PointingHandCursor)
+        menu = QMenu(b)
+
+        def fill(target, entries):
+            for it in entries:
+                if it is None:
+                    target.addSeparator()
+                elif isinstance(it, tuple):
+                    fill(target.addMenu(it[0]), it[1])
+                else:
+                    target.addAction(it)
+        fill(menu, items)
+        b.setMenu(menu)
+        return b
+
+    # ── side panels: show / hide / focus / reset ─────────────────────────────
+    def _apply_panels(self):
+        """Show or hide the Media and Details panels to match their View actions, and remember the choice."""
+        self.left_frame.setVisible(self.a_view_left.isChecked())
+        self.details_frame.setVisible(self.a_view_right.isChecked())
+        st = QSettings("Venma", "VideoEditor")
+        st.setValue(f"{LAYOUT_KEY}/left_on", self.a_view_left.isChecked())
+        st.setValue(f"{LAYOUT_KEY}/right_on", self.a_view_right.isChecked())
+
+    def _toggle_focus(self):
+        """Hide both side panels for a big preview; run again to bring them back."""
+        both_on = self.a_view_left.isChecked() or self.a_view_right.isChecked()
+        self.a_view_left.setChecked(not both_on)
+        self.a_view_right.setChecked(not both_on)
+        self._apply_panels()
+
+    def reset_layout(self):
+        self.a_view_left.setChecked(True)
+        self.a_view_right.setChecked(True)
+        self._apply_panels()
+        self.hsplit.setSizes([320, 760, 330])
+        self.vsplit.setSizes([560, 320])
+
+    def show_shortcuts(self):
+        """A list of every keyboard shortcut, built from the window's actions so it never goes out of date."""
+        rows, seen = [], set()
+        for a in self.actions():
+            sc = a.shortcut().toString(QKeySequence.NativeText)
+            if not sc:
+                continue
+            label = a.text().replace("&", "").replace("…", "").strip()
+            if not label:
+                label = a.toolTip().rsplit("  (", 1)[0].split(":")[0].strip()
+            if (label, sc) in seen:
+                continue
+            seen.add((label, sc))
+            rows.append((label, sc))
+        body = "".join(f"<tr><td style='padding:3px 18px 3px 0'>{l}</td><td><b>{s}</b></td></tr>" for l, s in rows)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Keyboard Shortcuts")
+        lay = QVBoxLayout(dlg)
+        lab = QLabel(f"<table>{body}</table>")
+        lab.setTextFormat(Qt.RichText)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(lab)
+        lay.addWidget(scroll)
+        dlg.resize(420, 520)
+        dlg.exec_()
 
     def _build_left_panel(self):
         """Media | Text category tabs (icon over label) switching the panel body."""
@@ -374,7 +454,7 @@ class MainWindow(QMainWindow):
             t = QLabel("Details")
             t.setObjectName("panelTitle")
             hl.addWidget(t)
-        return self._frame(head, self.props, min_w=290)
+        return self._frame(head, self.props, min_w=330)
 
     def _build_timeline_panel(self):
         """Toolbar (undo / tools / split / layers / snap / zoom) above the timeline, like CapCut."""
@@ -430,6 +510,9 @@ class MainWindow(QMainWindow):
         if not ok:
             self.hsplit.setSizes([320, 760, 330])
             self.vsplit.setSizes([560, 320])
+        self.a_view_left.setChecked(str(st.value(f"{LAYOUT_KEY}/left_on", True)).lower() not in ("false", "0"))
+        self.a_view_right.setChecked(str(st.value(f"{LAYOUT_KEY}/right_on", True)).lower() not in ("false", "0"))
+        self._apply_panels()
 
     def _save_layout(self):
         st = QSettings("Venma", "VideoEditor")
@@ -493,6 +576,92 @@ class MainWindow(QMainWindow):
                 "Or place ffmpeg(.exe) and ffprobe(.exe) in an 'ffmpeg' folder next to the app.")
         elif not HAS_MULTIMEDIA:
             self.statusBar().showMessage("QtMultimedia not available: the preview plays silently (video and export still work).", 10000)
+
+    # ── autosave & crash recovery ────────────────────────────────────────────
+    def _app_data_dir(self):
+        return QStandardPaths.writableLocation(QStandardPaths.AppDataLocation) or tempfile.gettempdir()
+
+    def _autosave_dir(self):
+        return os.path.join(self._app_data_dir(), autosave_core.FOLDER)
+
+    def _autosave_now(self):
+        """Snapshot unsaved work to disk if it changed since the last snapshot. True if the snapshot is current."""
+        if self.dirty and (self.project.clips or self.project.library()):
+            if not self._autosaver.sync(self.project.snapshot(), self.path):
+                return False
+        self._release_recovered()
+        return True
+
+    def _release_recovered(self):
+        """The recovered work is now safe elsewhere (this session's snapshot or a saved file): drop the old snapshot."""
+        if self._recovered_entry is not None:
+            autosave_core.discard(self._recovered_entry)
+            self._recovered_entry = None
+
+    def _autosave_tick(self):
+        self._autosaver.heartbeat()
+        if not self._autosave_now() and not self._autosave_warned:
+            self._autosave_warned = True
+            self.statusBar().showMessage("Autosave isn't working (the app data folder can't be written). "
+                                         "Save your project manually.", 15000)
+
+    def _forget_autosave(self):
+        """The unsaved work was saved or deliberately dropped: its snapshot is no longer needed."""
+        self._autosaver.clear()
+        self._release_recovered()
+
+    def offer_recovery(self):
+        """At startup: offer to bring back work left unsaved by a crash. Call once, right after show()."""
+        entries = autosave_core.find_recoverable(self._autosaver.directory, exclude_session=self._autosaver.session)
+        if not entries:
+            return False
+        first, others = entries[0], entries[1:]
+        when = datetime.fromtimestamp(first.saved_at).strftime("%d %b %Y, %H:%M")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Recover your work?")
+        box.setTextFormat(Qt.PlainText)
+        box.setText("Venma Video didn't close properly last time.")
+        box.setInformativeText(f"\"{first.name}\" had unsaved changes, last autosaved {when}.\n\nDo you want to recover them?")
+        recover = box.addButton("Recover", QMessageBox.AcceptRole)
+        discard = box.addButton("Discard", QMessageBox.DestructiveRole)
+        box.addButton("Ask me later", QMessageBox.RejectRole)       # also what Esc / the close button do: keeps everything
+        box.setDefaultButton(recover)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is recover:
+            self._recover(first)
+        elif clicked is discard:
+            autosave_core.discard(first)
+        else:
+            return True                                              # leave every snapshot for the next start
+        self._rescue_older(others)
+        return True
+
+    def _recover(self, entry):
+        try:
+            proj = Project.from_dict(entry.project)
+        except Exception as e:
+            autosave_core.quarantine(entry)                          # don't offer a broken snapshot on every start
+            QMessageBox.critical(self, "Recovery failed", f"The autosaved project could not be read:\n\n{e}")
+            return
+        path = entry.project_path
+        if path and not os.path.isdir(os.path.dirname(path)):
+            path = None                                              # its folder is gone: Save will ask for a new place
+        self._recovered_entry = entry
+        self._adopt_project(proj, path, "Recover Project", dirty=True)
+        self._autosave_now()                                         # drops the old snapshot once this session's is written
+        self.statusBar().showMessage("Recovered your unsaved work. Save the project to keep it.", 10000)
+
+    def _rescue_older(self, entries):
+        """Older crashed sessions can't all open in this window: save them as ordinary project files instead."""
+        if not entries:
+            return
+        folder = os.path.join(self._app_data_dir(), "Recovered projects")
+        saved = autosave_core.rescue(entries, folder, PROJECT_EXT)
+        if saved:
+            QMessageBox.information(self, "More recovered projects",
+                                    f"{saved} older unsaved project(s) from earlier sessions were saved as files in:\n\n{folder}")
 
     # ── history ──────────────────────────────────────────────────────────────
     def _reset_history(self, label):
@@ -1251,6 +1420,7 @@ class MainWindow(QMainWindow):
         self.project = Project(*d.values(), typed=True)
         self.project.set_background(*d.background())
         self.path, self.dirty = None, False
+        self._forget_autosave()
         self.thumbs.clear()
         self.engine.t = 0.0
         self._reset_history("New Project")
@@ -1292,11 +1462,17 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Open failed", str(e))
             return
+        self._adopt_project(proj, path, "Open Project")
+
+    def _adopt_project(self, proj, path, label, dirty=False):
+        """Make ``proj`` the current project (opened from ``path``, or recovered with ``dirty=True``)."""
         self.engine.pause()
-        self.project, self.path, self.dirty = proj, path, False
+        self.project, self.path, self.dirty = proj, path, dirty
+        if not dirty:
+            self._forget_autosave()
         self.thumbs.clear()
         self.engine.t = 0.0
-        self._reset_history("Open Project")
+        self._reset_history(label)
         self._refresh_all(rebuild_bin=True)
         missing = [m.name for m in proj.library() if not os.path.isfile(m.path)]
         if missing:
@@ -1336,6 +1512,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save failed", str(e))
             return False
         self.path, self.dirty = path, False
+        self._forget_autosave()
         self._refresh_all()
         self.statusBar().showMessage("Project saved.", 3000)
         return True
@@ -1456,4 +1633,7 @@ class MainWindow(QMainWindow):
             if isinstance(w, ExportWorker):
                 w.cancel()
             w.wait(2000)
+        self._autosave_timer.stop()
+        self._release_recovered()
+        self._autosaver.close()          # clean exit: nothing to recover next time
         e.accept()

@@ -185,6 +185,8 @@ _ICONS = {
     "align_right": ("fa5s.align-right", None), "keyboard": ("fa5s.keyboard", None), "info": ("fa5s.info-circle", None),
     "spark": ("fa5s.video", "spark"),
     "keyframe": ("fa5s.gem", "keyframe"),
+    "tab_speed": ("fa5s.tachometer-alt", "spark"), "tab_anim": ("fa5s.magic", "spark"),
+    "tab_trans": ("fa5s.exchange-alt", "spark"),
 }
 
 
@@ -336,6 +338,13 @@ QFrame#section {{ background: transparent; border: none; border-bottom: 1px soli
 QToolButton#sectionHead {{ background: transparent; border: none; border-radius: 6px; padding: 9px 2px;
     font-weight: 600; font-size: 9.5pt; text-align: left; }}
 QToolButton#sectionHead:hover {{ background: transparent; color: {t['accent']}; }}
+/* Properties tab rail (Illustrator style) */
+QFrame#rail {{ background: {t['surface']}; border: none; border-left: 1px solid {t['border']}; }}
+QToolButton#railTab {{ background: transparent; border: none; border-right: 2px solid transparent; border-radius: 0; }}
+QToolButton#railTab:hover {{ background: {t['accent_soft']}; }}
+QToolButton#railTab:checked {{ background: {t['accent_soft']}; border-right: 2px solid {t['accent']}; }}
+QLabel#emptyHint {{ color: {t['muted']}; font-size: 10pt; padding: 24px; }}
+QLabel#tabTitle {{ font-size: 9pt; font-weight: 700; color: {t['muted']}; }}
 QLabel#sectionNote {{ color: {t['muted']}; font-size: 9pt; }}
 QLabel#val {{ color: {t['muted']}; font-size: 9pt; }}
 QLabel#muted {{ color: {t['muted']}; font-size: 9pt; }}

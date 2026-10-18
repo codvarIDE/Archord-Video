@@ -216,6 +216,31 @@ when off), so they are saved in `.vvproj`, and undo/redo restores them with the 
 absolute path, not embedded. Bump `PROJECT_VERSION` and keep `from_dict` backward compatible when
 changing the format.
 
+## Autosave and crash recovery
+
+- **What is protected.** Unsaved work. `core/autosave.py` (no Qt) keeps one snapshot of the project per running copy of
+  the app, in `<app data>/Autosave/`. It is rewritten every 15 s (`AUTOSAVE_MS` in `ui/main_window.py`), but only when
+  the project is dirty and actually changed (`Autosaver.sync` compares the `Project.snapshot()` string). Empty projects
+  are never snapshotted.
+- **Sessions.** Each run has a random session id and two files: `<session>.lock` (process id, touched every tick) and
+  `<session>.vvauto` (JSON: format, saved_at, original project path, the project dict). A **clean exit** deletes both. A
+  **successful Save, New or Open** deletes the snapshot. A crash, kill or power cut leaves the snapshot behind.
+- **Who counts as crashed.** `find_recoverable` offers a snapshot only if its session is dead: the lock is missing, the
+  process is gone, **or** the lock has not been touched for `HEARTBEAT_TTL` (180 s; this covers a process id reused after
+  a reboot). Another window that is still running is never offered. `pid_alive` uses `OpenProcess` on Windows, never
+  `os.kill` (which would terminate the process there).
+- **Recovery flow.** `app.main` calls `MainWindow.offer_recovery()` right after `show()`: *Recover* / *Discard* /
+  *Ask me later* (Esc keeps everything). Recover loads the newest snapshot through `_adopt_project(..., dirty=True)`,
+  keeps the original save path if its folder still exists, and deletes the old snapshot only after this session's own
+  snapshot is written (`_recovered_entry`). Older crashed sessions are saved as normal `.vvproj` files in
+  `<app data>/Recovered projects/` (`autosave.rescue`). Unreadable snapshots are renamed `*.corrupt` and never offered.
+- **Atomic writes.** `core/fileio.py::atomic_write_text` (temp file, fsync, `os.replace`) is used for snapshots **and**
+  for `Project.save`, so a crash or full disk while saving can no longer corrupt the user's project file.
+- **Failure mode.** Nothing in `Autosaver` raises into the UI. If the app data folder can't be written the status bar
+  says so once; the editor keeps working.
+- **Tests.** `tests/test_autosave.py` includes a test that kills a real child process with `os._exit` and recovers its
+  work. The Qt prompts are thin wrappers over `core/autosave.py`.
+
 ## FFmpeg lookup order
 
 1. `VENMA_FFMPEG` / `VENMA_FFPROBE` env vars
