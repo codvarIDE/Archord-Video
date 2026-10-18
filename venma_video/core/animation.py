@@ -45,6 +45,14 @@ _EDGE = {
     "fall":        dict(label=("Fall", "Fall"), my=0.2, fade=True),
     "spin":        dict(label=("Spin", "Spin"), rot=180.0, s1=0.3, fade=True),
     "swing":       dict(label=("Swing", "Swing"), rot=25.0, s1=0.7, fade=True),
+    # Wipes reveal the picture through a moving edge instead of moving it. ``wipe`` = the direction the edge
+    # TRAVELS (like the slides: "left" starts at the right edge and sweeps left); "circle" grows from the centre.
+    # The reveal is measured against the whole frame. In only, there is no Out wipe.
+    "wipe_left":   dict(label=("Wipe Left", "Wipe Left"), wipe="left"),
+    "wipe_right":  dict(label=("Wipe Right", "Wipe Right"), wipe="right"),
+    "wipe_up":     dict(label=("Wipe Up", "Wipe Up"), wipe="up"),
+    "wipe_down":   dict(label=("Wipe Down", "Wipe Down"), wipe="down"),
+    "wipe_circle": dict(label=("Wipe Circle", "Wipe Circle"), wipe="circle"),
 }
 
 # ── Combo presets: they loop while the clip plays.  ``P`` = progress through the whole clip (0..1),
@@ -64,7 +72,7 @@ _COMBO = {
 }
 
 IN_PRESETS = list(_EDGE)
-OUT_PRESETS = list(_EDGE)
+OUT_PRESETS = [n for n, spec in _EDGE.items() if not spec.get("wipe")]
 COMBO_PRESETS = list(_COMBO)
 
 
@@ -95,7 +103,7 @@ def clean(anim):
         return out
     for slot in ("in", "out"):
         name = anim.get(slot)
-        if name in _EDGE:
+        if name in _EDGE and not (slot == "out" and _EDGE[name].get("wipe")):
             out[slot] = name
             d = anim.get(slot + "_dur")
             if d is not None:
@@ -203,14 +211,16 @@ def _combine(parts, op):
 def expressions(anim, clip_duration):
     """FFmpeg-language expressions for an animation, or ``None`` when the clip isn't animated.
 
-    Returns ``dict(dx, dy, scale, rotation, fade_in, fade_out)``: the first four are expression strings in
-    ``t`` (clip-local seconds); ``fade_in`` / ``fade_out`` are fade durations in seconds (0 = none)."""
+    Returns ``dict(dx, dy, scale, rotation, fade_in, fade_out, wipe)``: the first four are expression strings in
+    ``t`` (clip-local seconds); ``fade_in`` / ``fade_out`` are fade durations in seconds (0 = none); ``wipe`` is
+    ``None`` or ``(kind, seconds)``: the In reveal that starts at the clip's first frame (see :func:`wipe_progress`)."""
     a = clean(anim)
     if not is_active(a):
         return None
     D = max(1e-3, float(clip_duration))
     dxs, dys, scs, rts = [], [], [], []
     fade_in = fade_out = 0.0
+    wipe = None
     if a.get("combo"):
         spec = _COMBO[a["combo"]]
         sub = {"P": f"clip(t/{_num(D)},0,1)", "D": _num(D)}
@@ -223,6 +233,9 @@ def expressions(anim, clip_duration):
             if d <= 1e-6:
                 continue
             spec = _EDGE[a[slot]]
+            if spec.get("wipe"):
+                wipe = (spec["wipe"], d)             # a mask, not a motion: the renderers handle it themselves
+                continue
             dx, dy, sc, rt = _edge_terms(spec, slot, start, d)
             dxs.append(dx), dys.append(dy), scs.append(sc), rts.append(rt)
             if spec.get("fade"):
@@ -233,7 +246,14 @@ def expressions(anim, clip_duration):
     scale = _combine(scs, "*")
     return dict(dx=_combine(dxs, "+"), dy=_combine(dys, "+"), rotation=_combine(rts, "+"),
                 scale=scale if scale == "1" else f"max({_num(MIN_SCALE)},{scale})",
-                fade_in=fade_in, fade_out=fade_out)
+                fade_in=fade_in, fade_out=fade_out, wipe=wipe)
+
+
+def wipe_progress(seconds, var="t"):
+    """Expression (FFmpeg language) for how much of the picture a wipe has revealed: 0 -> 1, eased, over
+    ``seconds`` of the variable ``var`` (clip-local time; the exporter passes an offset ``T`` for ``geq``)."""
+    u = f"clip(({var})/{_num(max(1e-3, seconds))},0,1)"
+    return f"({u}*{u}*(3-2*{u}))"
 
 
 # ── evaluation (preview) ──────────────────────────────────────────────────────────────────────────────
@@ -256,7 +276,7 @@ NEUTRAL = dict(dx=0.0, dy=0.0, scale=1.0, rotation=0.0, opacity=1.0)
 
 def values_at(anim, clip_duration, t_clip):
     """The animation's effect ``t_clip`` seconds into a clip of ``clip_duration`` seconds
-    (``NEUTRAL`` when the clip has no animation)."""
+    (``NEUTRAL`` when the clip has no animation). A wipe-in adds a ``wipe`` key: ``(kind, revealed 0..1)``."""
     ex = expressions(anim, clip_duration)
     if ex is None:
         return dict(NEUTRAL)
@@ -266,5 +286,8 @@ def values_at(anim, clip_duration, t_clip):
         opacity *= min(1.0, t / ex["fade_in"])
     if ex["fade_out"] > 0:
         opacity *= min(1.0, max(0.0, (float(clip_duration) - t) / ex["fade_out"]))
-    return dict(dx=_eval(ex["dx"], t), dy=_eval(ex["dy"], t), scale=_eval(ex["scale"], t),
-                rotation=_eval(ex["rotation"], t), opacity=opacity)
+    out = dict(dx=_eval(ex["dx"], t), dy=_eval(ex["dy"], t), scale=_eval(ex["scale"], t),
+               rotation=_eval(ex["rotation"], t), opacity=opacity)
+    if ex["wipe"] is not None:                    # only present while a wipe-in is set: (kind, how much is revealed 0..1)
+        out["wipe"] = (ex["wipe"][0], _eval(wipe_progress(ex["wipe"][1]), t))
+    return out

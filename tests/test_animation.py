@@ -27,7 +27,7 @@ class PresetTests(unittest.TestCase):
                 with self.subTest(anim=a, t=t):
                     self.assertGreater(v["scale"], 0.0)
                     self.assertTrue(0.0 <= v["opacity"] <= 1.0)
-                    self.assertTrue(all(abs(v[k]) < 1000 for k in v))
+                    self.assertTrue(all(abs(v[k]) < 1000 for k in A.NEUTRAL))
 
     def test_in_starts_away_and_ends_at_rest(self):
         a = {"in": "slide_left", "in_dur": 0.5}

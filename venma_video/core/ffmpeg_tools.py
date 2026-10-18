@@ -1,6 +1,7 @@
 
 import atexit
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -343,6 +344,43 @@ def _place(src, dst, W, H, clip, fps, tag, bg="black@0", animate=False):
             f"[bg{tag}][{src}]overlay=x='{px}{off_x}-w/2':y='{py}{off_y}-h/2':format=auto:shortest=1[{dst}]"]
 
 
+def _wipe_condition(kind, W, H, p):
+    """geq condition (pixel ``X``, ``Y``) that is true where a wipe of ``kind`` has revealed the picture, when ``p`` is
+    the expression for how much (0..1). Pixel centres are used so 0 reveals nothing and 1 reveals everything.
+    The edge travels in the direction of the name: ``left`` starts at the right edge and sweeps left."""
+    x, y = "(X+0.5)", "(Y+0.5)"
+    if kind == "left":
+        return f"gt({x},{_n6(W)}*(1-{p}))"
+    if kind == "right":
+        return f"lt({x},{_n6(W)}*{p})"
+    if kind == "up":
+        return f"gt({y},{_n6(H)}*(1-{p}))"
+    if kind == "down":
+        return f"lt({y},{_n6(H)}*{p})"
+    r = math.hypot(W / 2.0, H / 2.0)                  # circle: reaches the corners at 1
+    return f"lt(hypot({x}-{_n6(W / 2.0)},{y}-{_n6(H / 2.0)}),{_n6(r)}*{p})"
+
+
+def _wipe_filters(i, c, kind, seconds, W, H, fps, end):
+    """Graph lines that apply a wipe-in to the finished, frame-sized stream ``[v<i>]``.
+
+    ``geq`` is slow, so only the first ``seconds`` of the clip (the head) go through it: the stream is split in two,
+    and the caller overlays head and tail one after the other. When the wipe lasts as long as the clip (``end`` is
+    where its picture stops, hold included) there is no tail and the whole stream is masked.
+    Returns (lines, [(label, first second, last second)])."""
+    s0 = c.start
+    s1 = c.start + seconds
+    p = animation.wipe_progress(seconds, f"T-{_num(s0)}")
+    cond = _wipe_condition(kind, W, H, p)
+    mask = f"format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*if({cond},1,0)'"
+    if s1 + 1.5 / fps >= end:
+        return [f"[v{i}]{mask}[vh{i}]"], [(f"vh{i}", s0, end)]
+    lines = [f"[v{i}]split=2[wh{i}][wt{i}]",
+             f"[wh{i}]trim=start={_num(s0)}:end={_num(s1)},{mask}[vh{i}]",
+             f"[wt{i}]trim=start={_num(s1)}[vt{i}]"]
+    return lines, [(f"vh{i}", s0, s1), (f"vt{i}", s1, end)]
+
+
 def _roles(project, c):
     """(draws a picture, makes sound) for clip ``c``: what the exporter has to render for it."""
     m = project.media[c.media_id]
@@ -442,8 +480,7 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
     spec = FORMATS[fmt]
 
     cmd = [exe, "-y", "-v", "error", "-nostdin"]
-    vparts, aparts = [], []      # (z-order, label) / label
-    holds = {}                   # input index -> seconds the picture is held past its end (under a transition)
+    vparts, aparts = [], []      # (label, first second, last second) of each picture overlay / audio label
     filters = []
     n = 0
     for c in sorted(project.clips, key=lambda c: (-c.track, c.start)):      # lower tracks first
@@ -472,8 +509,6 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             lead = ["reverse"] if inline_reverse else []
             if abs(c.speed - 1.0) > 1e-9 and m.kind not in ("image", "text"):
                 lead.append(f"setpts=(PTS-STARTPTS)/{_n6(c.speed)}")
-            if hold > 0:
-                holds[i] = hold
             keep = [f"tpad=stop_mode=clone:stop_duration={_n6(hold)}"] if hold > 0 and m.kind == "video" else []
             chain = lead + [f"fps={fps}"] + keep + _fit(W, H, c)
             if not moved:
@@ -493,7 +528,14 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
             else:
                 chain.append(f"setpts=PTS-STARTPTS+{_num(c.start)}/TB")
                 filters.append(f"[{i}:v]{','.join(chain)}[v{i}]")
-            vparts.append((i, c))
+            end = c.end + hold
+            wipe = (animation.expressions(c.animation, c.duration) or {}).get("wipe")
+            if wipe:                                                # a wipe-in (In animation or transition): a mask
+                lines, parts = _wipe_filters(i, c, wipe[0], wipe[1], W, H, fps, end)
+                filters += lines
+                vparts += parts
+            else:
+                vparts.append((f"v{i}", c.start, end))
         if sound:
             delay = int(round(c.start * 1000))
             alead = (["areverse"] if inline_reverse else []) + _atempo_chain(c.speed)
@@ -503,9 +545,9 @@ def build_export_command(project, out_path, fmt="MP4 (H.264 + AAC)", quality="Me
 
     filters.insert(0, f"color=c=black:s={W}x{H}:r={fps}:d={_num(total)},format=rgba[base]")
     last = "base"
-    for k, (i, c) in enumerate(vparts):
+    for k, (lab, t0, t1) in enumerate(vparts):
         out = f"o{k}"
-        filters.append(f"[{last}][v{i}]overlay=enable='between(t,{_num(c.start)},{_num(c.end + holds.get(i, 0.0))})'[{out}]")
+        filters.append(f"[{last}][{lab}]overlay=enable='between(t,{_num(t0)},{_num(t1)})'[{out}]")
         last = out
     filters.append(f"[{last}]format=yuv420p[vout]")
     maps = ["-map", "[vout]"]

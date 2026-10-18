@@ -27,7 +27,7 @@ import time
 from collections import OrderedDict, deque
 
 from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QRect, QRectF, QPointF, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QImage, QPen, QBrush
+from PyQt5.QtGui import QPainter, QPainterPath, QColor, QImage, QPen, QBrush
 from PyQt5.QtWidgets import QWidget
 
 from ..core import ffmpeg_tools as ft
@@ -44,6 +44,27 @@ _NOWIN = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 
 # ══ view ══════════════════════════════════════════════════════════════════════════════════════
+def wipe_region(frame, kind, progress):
+    """The part of ``frame`` (a QRectF) a wipe-in has revealed: a QRectF, or a QPainterPath for the circle.
+
+    The exporter builds the same shape from the same ``progress`` (``ffmpeg_tools._wipe_condition``); the edge travels
+    in the direction of the name, so ``left`` starts at the right edge and sweeps left."""
+    k = max(0.0, min(1.0, progress))
+    x, y, w, h = frame.x(), frame.y(), frame.width(), frame.height()
+    if kind == "left":
+        return QRectF(x + w * (1 - k), y, w * k, h)
+    if kind == "right":
+        return QRectF(x, y, w * k, h)
+    if kind == "up":
+        return QRectF(x, y + h * (1 - k), w, h * k)
+    if kind == "down":
+        return QRectF(x, y, w, h * k)
+    rad = math.hypot(w / 2.0, h / 2.0) * k            # circle: reaches the corners at 1
+    path = QPainterPath()
+    path.addEllipse(frame.center(), rad, rad)
+    return path
+
+
 class PreviewView(QWidget):
     """Paints the frame: every visible layer, one by one, in stacking order (last added layer in front).
 
@@ -273,6 +294,12 @@ class PreviewView(QWidget):
                 p.save()
                 if hasattr(c, "has_animation") and c.has_animation():
                     av = c.anim_values(t_clip)                  # In / Out / Combo animation on top of the clip's own transform
+                    if av.get("wipe"):                          # a wipe-in reveals the picture through a moving edge
+                        region = wipe_region(frame, *av["wipe"])
+                        if isinstance(region, QPainterPath):
+                            p.setClipPath(region, Qt.IntersectClip)
+                        else:
+                            p.setClipRect(region, Qt.IntersectClip)
                     ctr = box.center()
                     p.translate(av["dx"] * frame.width(), av["dy"] * frame.height())
                     p.translate(ctr)

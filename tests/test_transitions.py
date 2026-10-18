@@ -16,6 +16,7 @@ from venma_video.core.project import (
 try:
     import PyQt5  # noqa: F401
     HAVE_QT = True
+    from PyQt5.QtCore import QPointF
 except ImportError:
     HAVE_QT = False
 HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
@@ -37,6 +38,29 @@ class TransitionModelTests(unittest.TestCase):
         self.assertTrue(p.set_transition(b.id, "fade"))
         self.assertEqual(b.transition, {"type": "fade", "dur": DEFAULT_TRANSITION})
         self.assertEqual(Clip.from_dict(b.to_dict()).transition, b.transition)
+
+    def test_all_wipes_are_transitions_and_in_animations_but_not_out_animations(self):
+        from venma_video.core import animation as A
+        wipes = ["wipe_left", "wipe_right", "wipe_up", "wipe_down", "wipe_circle"]
+        p, a, b = two_clips()
+        for w in wipes:
+            self.assertTrue(p.set_transition(b.id, w, 1.0), w)
+            self.assertEqual(Clip.from_dict(b.to_dict()).transition["type"], w)
+            self.assertIn(w, A.IN_PRESETS)
+            self.assertNotIn(w, A.OUT_PRESETS)
+            self.assertEqual(A.clean({"out": w, "in": w}), {"in": w})
+        self.assertEqual([n for n, _ in __import__("venma_video.core.project", fromlist=["x"]).TRANSITIONS
+                          if n.startswith("wipe")], wipes)
+
+    def test_wipe_progress_is_eased_from_nothing_to_everything(self):
+        from venma_video.core import animation as A
+        a = {"in": "wipe_left", "in_dur": 1.0}
+        self.assertEqual(A.values_at(a, 4, 0.0)["wipe"], ("left", 0.0))
+        self.assertAlmostEqual(A.values_at(a, 4, 0.5)["wipe"][1], 0.5)
+        self.assertEqual(A.values_at(a, 4, 3.0)["wipe"], ("left", 1.0))
+        self.assertNotIn("wipe", A.values_at({"in": "fade"}, 4, 0.2))           # other animations are unchanged
+        self.assertEqual(A.values_at(a, 4, 0.0)["opacity"], 1.0)                # a wipe never fades or moves
+        self.assertEqual((A.values_at(a, 4, 0.2)["dx"], A.values_at(a, 4, 0.2)["scale"]), (0.0, 1.0))
 
     def test_unknown_names_and_clamped_durations(self):
         p, a, b = two_clips()
@@ -149,6 +173,26 @@ class TransitionCommandTests(unittest.TestCase):
         i = cmd.index("/tmp/b.png")
         self.assertEqual(cmd[i - 2], "2.5")                             # -t 2 + 0.5 s hold
 
+    def test_wipe_masks_only_the_first_seconds_of_the_clip(self):
+        p, a, b = two_clips()
+        p.set_transition(b.id, "wipe_right", 1.0)
+        g = self.graph(p)
+        self.assertEqual(g.count("geq="), 1)
+        self.assertIn("trim=start=2:end=3", g)                          # the head goes through geq ...
+        self.assertIn("trim=start=3[", g)                               # ... the rest of the clip does not
+        self.assertIn("between(t,2,3)", g)
+        self.assertIn("between(t,3,4)", g)
+        p.set_transition(b.id, "fade", 1.0)
+        self.assertNotIn("geq=", self.graph(p))
+
+    def test_wipe_as_long_as_the_clip_masks_all_of_it_and_has_no_empty_tail(self):
+        p, a, b = two_clips(dur_b=1.0)
+        p.set_transition(b.id, "wipe_left", 1.0)
+        g = self.graph(p)
+        self.assertEqual(g.count("geq="), 1)
+        self.assertNotIn("trim=start=3[", g)
+        self.assertNotIn("[vt", g)
+
     def test_inert_transition_changes_nothing(self):
         p, a, b = two_clips(gap=1.0)
         plain = self.graph(p)
@@ -214,6 +258,54 @@ class TransitionRenderTests(unittest.TestCase):
         self.assertGreater(self.pixel(out, 2.05)[0], 200)                       # starts still showing the held red
         self.assertGreater(self.pixel(out, 2.9)[1], 100)                        # ends fully green
         self.assertLess(self.pixel(out, 2.9)[0], 40)
+
+    def _row(self, out, t):
+        return [self.pixel_at(out, t, x, 18)[1] > 100 for x in (2, 16, 32, 48, 61)]       # green? at 5 columns
+
+    def pixel_at(self, video, t, x, y):
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(t), "-i", video, "-frames:v", "1", "-f", "rawvideo",
+                              "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+        i = (y * 64 + x) * 3
+        return raw[i], raw[i + 1], raw[i + 2]
+
+    def _col(self, out, t):
+        return [self.pixel_at(out, t, 32, y)[1] > 100 for y in (1, 9, 18, 27, 34)]
+
+    def test_wipes_reveal_from_the_side_they_travel_towards(self):
+        F, T = False, True
+        out = self.render("wipe_left", 1.0)                                     # edge starts at the right, sweeps left
+        self.assertAlmostEqual(self.duration(out), 4.0, delta=0.15)
+        self.assertEqual(self._row(out, 2.0), [F, F, F, F, F])                  # nothing revealed yet: still the held red
+        self.assertEqual(self._row(out, 2.25), [F, F, F, F, T])
+        self.assertEqual(self._row(out, 2.75), [F, T, T, T, T])
+        self.assertEqual(self._row(out, 3.5), [T] * 5)                          # then the clip plays normally
+        out = self.render("wipe_right", 1.0)
+        self.assertEqual(self._row(out, 2.25), [T, F, F, F, F])
+        self.assertEqual(self._row(out, 2.75), [T, T, T, T, F])
+        out = self.render("wipe_up", 1.0)
+        self.assertEqual(self._col(out, 2.25), [F, F, F, F, T])                 # starts at the bottom
+        self.assertEqual(self._row(out, 2.25), [F] * 5)
+        out = self.render("wipe_down", 1.0)
+        self.assertEqual(self._col(out, 2.25), [T, F, F, F, F])
+        self.assertEqual(self._col(out, 3.5), [T] * 5)
+
+    def test_circle_grows_from_the_centre_and_covers_the_corners(self):
+        out = self.render("wipe_circle", 1.0)
+        self.assertEqual(self._row(out, 2.25), [False, False, True, False, False])
+        self.assertEqual(self._row(out, 2.5), [False, True, True, True, False])
+        self.assertTrue(self.pixel_at(out, 3.1, 0, 0)[1] > 100 and self.pixel_at(out, 3.1, 63, 35)[1] > 100)
+        self.assertAlmostEqual(self.duration(out), 4.0, delta=0.15)
+
+    def test_a_wipe_in_animation_works_without_a_transition(self):
+        p = Project(64, 36, 10)
+        p.add_media(MediaItem("g", self.paths["green"], "video", 2.0, 64, 36, 10, False))
+        c = p.add_clip("g", 1, 0.0)
+        p.set_animation(c.id, "in", "wipe_right", 1.0)
+        out = os.path.join(self.tmp, "anim.mp4")
+        r = subprocess.run(ft.build_export_command(p, out, quality="Low"), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertEqual(self._row(out, 0.2), [True, False, False, False, False])
+        self.assertEqual(self._row(out, 1.5), [True] * 5)
 
     def test_no_transition_is_a_hard_cut(self):
         out = self.render("", 0.5)
@@ -290,6 +382,39 @@ class TransitionUiTests(unittest.TestCase):
             w.props._pick_transition("fade")
         self.assertIn("Transition set", w.statusBar().currentMessage())
         self.assertIn("Not showing yet", w.props._trans_hint.text())
+
+    def test_panel_offers_the_wipes(self):
+        w = self.window()
+        w.timeline.canvas.select(w.b.id)
+        for name in ("wipe_left", "wipe_right", "wipe_up", "wipe_down", "wipe_circle"):
+            self.assertIn(name, w.props._trans_btns)
+        with mock.patch.object(w.engine, "play"), mock.patch.object(w.engine, "seek"):
+            w.props._pick_transition("wipe_up")
+        self.assertEqual(w.labels[-1], "Transition: Wipe Up")
+
+    def test_preview_wipe_region_matches_the_exporter(self):
+        from PyQt5.QtCore import QRectF
+        from PyQt5.QtGui import QPainterPath
+        from venma_video.ui.preview import wipe_region
+        f = QRectF(10, 20, 100, 50)
+        self.assertEqual(wipe_region(f, "left", 0.25), QRectF(85, 20, 25, 50))          # starts at the right edge
+        self.assertEqual(wipe_region(f, "right", 0.25), QRectF(10, 20, 25, 50))
+        self.assertEqual(wipe_region(f, "up", 0.5), QRectF(10, 45, 100, 25))
+        self.assertEqual(wipe_region(f, "down", 0.5), QRectF(10, 20, 100, 25))
+        self.assertEqual(wipe_region(f, "right", 0.0).width(), 0.0)
+        self.assertEqual(wipe_region(f, "right", 1.0), f)
+        circle = wipe_region(f, "circle", 1.0)
+        self.assertIsInstance(circle, QPainterPath)
+        self.assertTrue(circle.contains(f.topLeft() + QPointF(1, 1)))               # reaches the corners at 1
+        self.assertFalse(wipe_region(f, "circle", 0.2).contains(f.topLeft() + QPointF(1, 1)))
+
+    def test_preview_paints_a_wipe_through_the_stack(self):
+        w = self.window()
+        w.project.set_transition(w.b.id, "wipe_circle", 1.0)
+        w.engine.t = 2.3
+        self.assertEqual(w.engine._stack_now()[1].animation["in"], "wipe_circle")
+        w.view.resize(400, 250)
+        self.assertFalse(w.view.grab().isNull())
 
     def test_hidden_for_titles_and_reset_clears_it(self):
         w = self.window()

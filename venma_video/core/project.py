@@ -95,11 +95,13 @@ def clamp_speed(v):
 
 # Transitions (CapCut style). A transition belongs to the INCOMING clip and plays where it meets the clip that ends
 # exactly where it starts on the same layer: the outgoing clip's last frame is held underneath for ``dur`` seconds while
-# the incoming clip's own first ``dur`` seconds animate in over it (dissolve, slide, zoom...). Nothing gets shorter and
+# the incoming clip's own first ``dur`` seconds animate in over it (dissolve, slide, zoom, wipe...). Nothing gets shorter and
 # the project length never changes. The motion is one of the In animations, so preview and export share one definition.
 TRANSITIONS = (("fade", "Dissolve"), ("grow", "Zoom In"), ("swell", "Zoom Out"), ("pop", "Pop"),
                ("slide_left", "Slide Left"), ("slide_right", "Slide Right"), ("slide_up", "Slide Up"),
-               ("slide_down", "Slide Down"), ("rise", "Rise"), ("fall", "Fall"), ("spin", "Spin"), ("swing", "Swing"))
+               ("slide_down", "Slide Down"), ("rise", "Rise"), ("fall", "Fall"), ("spin", "Spin"), ("swing", "Swing"),
+               ("wipe_left", "Wipe Left"), ("wipe_right", "Wipe Right"), ("wipe_up", "Wipe Up"),
+               ("wipe_down", "Wipe Down"), ("wipe_circle", "Wipe Circle"))
 TRANSITION_NAMES = tuple(n for n, _ in TRANSITIONS)
 MIN_TRANSITION, MAX_TRANSITION, DEFAULT_TRANSITION = 0.1, 3.0, 0.5
 TRANSITION_TOUCH = 0.05      # two clips "meet" when the gap between them is at most this (seconds)

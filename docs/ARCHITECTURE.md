@@ -117,6 +117,13 @@ of the clip's start; otherwise it is dormant (kept, not drawn).
   `Project.render_clip(c)` returns a copy whose `animation` has the transition baked in (it replaces In / Combo on the
   incoming clip and drops the Out of the outgoing one, whose held frame must not fade to black). Both renderers draw
   that copy: `PreviewEngine._stack_now` and `build_export_command`.
+- **Wipes.** `wipe_left/right/up/down/circle` are In presets with a `wipe` key instead of a motion: a mask, not a
+  transform. `animation.expressions` returns `wipe=(kind, seconds)` and `animation.wipe_progress` is the eased 0..1
+  reveal expression both renderers use. The preview clips the layer to `preview.wipe_region` (a rect, or an ellipse
+  path for the circle). The exporter applies `ffmpeg_tools._wipe_condition` with `geq`, but only to the clip's first
+  `seconds` (`split` + `trim`, head and tail overlaid one after the other) because `geq` is slow. Wipes are In-only
+  (`OUT_PRESETS` leaves them out) and are measured against the whole frame. `values_at` adds a `wipe` key only
+  while one is set.
 - **The hold.** The outgoing clip stays visible for `hold_after(c)` seconds past its end. `held_clips_at` /
   `visual_clips_at` / `video_clips_at(held=True)` include it in paint order (below the incoming clip); decoders and
   sound use `held=False`, and the preview shows its last real frame as a still. Export pads video with
